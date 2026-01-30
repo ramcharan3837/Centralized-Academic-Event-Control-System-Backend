@@ -628,116 +628,48 @@ app.delete("/events/:id", authenticateToken, async (req, res) => {
 
 
 // Update event
-app.put("/events/:id", authenticateToken, async (req, res) => {
-  try {
-    const eventId = req.params.id;
-    const updatedData = req.body;
-
-
-    const db = client.db("project_event_db");
-    const eventsCollection = db.collection("events");
-    const usersCollection = db.collection("users");
-    const registrationsCollection = db.collection("registrations");
-
-
-    const user = await usersCollection.findOne({ email: req.user.email });
-
-
-    // Old event before update
-    const oldEvent = await eventsCollection.findOne({
-      _id: new ObjectId(eventId),
-    });
-    if (!oldEvent) {
-      return res.status(404).json({ message: "Event not found" });
-    }
-
-
-    const isAdmin = user.role === "admin";
-    const isOrganizer = user.role === "organizer";
-
-
-    // Admin edits stay approved, others go pending
-    updatedData.approved = isAdmin ? true : false;
-    updatedData.updatedAt = new Date();
-
-
-    const result = await eventsCollection.updateOne(
-      { _id: new ObjectId(eventId) },
-      { $set: updatedData }
-    );
-
-
-    if (result.matchedCount === 0) {
-      return res.status(404).json({ message: "Event not found" });
-    }
-
-
-    const successMessage = isAdmin
-      ? "Event updated successfully"
-      : "Event updated and submitted for re-approval";
-
-
-    const newEvent = await eventsCollection.findOne({
-      _id: new ObjectId(eventId),
-    });
-
-
-    // If non-admin updated, notify admins/organizers for review
-    const userRole = user.role === "admin" || user?.role === "organizer" || user?.role === "user";
-
-
-    if (!isAdmin) {
-      const approvers = await usersCollection
-        .find({ role: { $in: ["admin", "organizer"] } })
-        .project({ _id: 1 })
-        .toArray();
-
-
-      const notifyPromises = approvers.map((u) =>
-        createNotification({
-          userId: u._id,
-          eventId: newEvent._id,
-          type: "event_updated_for_approval",
-          title: "Event updated and needs review",
-          message: `${user.fullName} updated the event "${newEvent.name}". Please review and approve.`,
-        })
-      );
-      await Promise.all(notifyPromises);
-    }
-
-
-    // If admin/organizer changed date or venue, notify all registered users
-    const dateChanged =
-      oldEvent.date && newEvent.date && oldEvent.date !== newEvent.date;
-    const venueChanged =
-      oldEvent.venue && newEvent.venue && oldEvent.venue !== newEvent.venue;
-
-
-    if ((dateChanged || venueChanged) && (isAdmin || isOrganizer)) {
-      const regs = await registrationsCollection
-        .find({ eventId: new ObjectId(eventId) })
-        .toArray();
-
-
-      const notifyUserPromises = regs.map((r) =>
-        createNotification({
-          userId: r.userId,
-          eventId: newEvent._id,
-          type: "event_updated",
-          title: "Event details updated",
-          message: `The event "${newEvent.name}" has updated details.\n\nNew date: ${newEvent.date}\nNew venue: ${newEvent.venue}`,
-        })
-      );
-      await Promise.all(notifyUserPromises);
-    }
-
-
-    res.json({ message: successMessage });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
+app.put('/events/:id', authenticateToken, async (req, res) => {
+  try {
+    const eventId = req.params.id;
+    const updatedData = req.body;
+    
+    const db = client.db('project_event_db');
+    const eventsCollection = db.collection('events');
+    const usersCollection = db.collection('users');
+    
+    const user = await usersCollection.findOne({ email: req.user.email });
+    const oldEvent = await eventsCollection.findOne({ _id: new ObjectId(eventId) });
+    
+    if (!oldEvent) return res.status(404).json({ message: 'Event not found' });
+    
+    // Organizer can ONLY update OWN events
+    const isOwner = oldEvent.createdBy === req.user.email;
+    if (req.user.role !== 'admin' && !isOwner) {
+      return res.status(403).json({ message: 'Can only update your own events' });
+    }
+    
+    // Organizers: reset approval (needs admin re-approval)
+    if (req.user.role === 'organizer') {
+      updatedData.approved = false;
+    }
+    
+    updatedData.updatedAt = new Date();
+    const result = await eventsCollection.updateOne(
+      { _id: new ObjectId(eventId) }, 
+      { $set: updatedData }
+    );
+    
+    if (result.matchedCount === 0) return res.status(404).json({ message: 'Event not found' });
+    
+    const newEvent = await eventsCollection.findOne({ _id: new ObjectId(eventId) });
+    res.json({ message: 'Event updated successfully', event: newEvent });
+    
+  } catch (err) {
+    console.error('Update event error:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
+
 
 
 // --------------------- REGISTRATIONS ---------------------
