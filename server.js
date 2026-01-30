@@ -303,7 +303,7 @@ app.post("/login", async (req, res) => {
 
 
 // Get all users (admin + organizer)
-app.get("/users", authenticateToken, isAdminOrOrganizer, async (req, res) => {
+app.get("/users", authenticateToken, async (req, res) => {
   try {
     const db = client.db("project_event_db");
     const usersCollection = db.collection("users");
@@ -337,7 +337,7 @@ app.get("/users", authenticateToken, isAdminOrOrganizer, async (req, res) => {
 app.put(
   "/users/:id/role",
   authenticateToken,
-  isAdminOrOrganizer,
+ 
   async (req, res) => {
     try {
       const userId = req.params.id;
@@ -533,7 +533,6 @@ app.get("/events", async (req, res) => {
 app.get(
   "/events/pending",
   authenticateToken,
-  isAdminOrOrganizer,
   async (req, res) => {
     try {
       const events = await client
@@ -555,7 +554,6 @@ app.get(
 app.put(
   "/events/:id/approve",
   authenticateToken,
-  isAdminOrOrganizer,
   async (req, res) => {
     try {
       const id = req.params.id;
@@ -592,7 +590,6 @@ app.put(
 app.delete(
   "/events/:id/reject",
   authenticateToken,
-  isAdminOrOrganizer,
   async (req, res) => {
     try {
       const id = req.params.id;
@@ -644,9 +641,9 @@ app.put('/events/:id', authenticateToken, async (req, res) => {
     
     // Organizer can ONLY update OWN events
     const isOwner = oldEvent.createdBy === req.user.email;
-    if (req.user.role !== 'admin' && !isOwner) {
-      return res.status(403).json({ message: 'Can only update your own events' });
-    }
+    // if (req.user.role !== 'admin' && !isOwner) {
+    //   return res.status(403).json({ message: 'Can only update your own events' });
+    // }
     
     // Organizers: reset approval (needs admin re-approval)
     if (req.user.role === 'organizer') {
@@ -800,7 +797,7 @@ app.get(
 app.get(
   "/events/:eventId/registrations",
   authenticateToken,
-  isAdminOrOrganizer,
+
   async (req, res) => {
     try {
       const { eventId } = req.params;
@@ -886,7 +883,6 @@ app.get(
 app.post(
   "/events/:eventId/attendance",
   authenticateToken,
-  isAdminOrOrganizer,
   async (req, res) => {
     try {
       const { eventId } = req.params;
@@ -1102,62 +1098,57 @@ app.put("/notifications/read-all", authenticateToken, async (req, res) => {
 });
 
 
+
 // Get all attended events for a specific user (events in the past)
+// Get all attended events for a specific user (events where user was marked present)
 app.get("/users/:userId/attended", authenticateToken, async (req, res) => {
-  try {
-    const requestedUserId = req.params.userId;
-    const authUserId = req.user.userId; // from JWT
+  try {
+    const requestedUserId = req.params.userId;
+    const authUserId = req.user.userId; // from JWT
 
+    // Only allow user to view their own attended events or admin sees all
+    if (req.user.role !== "admin" && authUserId !== requestedUserId) {
+      return res
+        .status(403)
+        .json({ status: "Error", message: "Not authorized to view these events" });
+    }
 
-    // Only allow user to view their own attended events or admin sees all
-    if (req.user.role !== "admin" && authUserId !== requestedUserId) {
-      return res
-        .status(403)
-        .json({ status: "Error", message: "Not authorized to view these events" });
-    }
+    const db = client.db("project_event_db");
+    const attendanceCollection = db.collection("attendance");
+    const eventsCollection = db.collection("events");
 
+    // Find attendance records for this user where status is "present"
+    const attendanceRecords = await attendanceCollection
+      .find({ 
+        userId: new ObjectId(requestedUserId),
+        status: "present"
+      })
+      .toArray();
 
-    const db = client.db("project_event_db");
-    const registrationsCollection = db.collection("registrations");
-    const eventsCollection = db.collection("events");
+    if (attendanceRecords.length === 0) {
+      return res.json({ status: "Success", events: [] });
+    }
 
+    // Extract event IDs from attendance records
+    const eventIds = attendanceRecords.map((record) => record.eventId);
 
-    // Find registrations for this user
-    const regs = await registrationsCollection
-      .find({ userId: new ObjectId(requestedUserId) })
-      .toArray();
+    // Fetch event details
+    const attendedEvents = await eventsCollection
+      .find({ _id: { $in: eventIds } })
+      .toArray();
 
-
-    const eventIds = regs.map((r) => r.eventId);
-    if (eventIds.length === 0) {
-      return res.json({ status: "Success", events: [] });
-    }
-
-
-    // Fetch event details
-    const allEvents = await eventsCollection
-      .find({ _id: { $in: eventIds } })
-      .toArray();
-
-
-    const today = new Date();
-
-
-    // Only events whose date is in the past are "attended"
-    const attendedEvents = allEvents.filter((event) => {
-      if (!event.date) return false;
-      return new Date(event.date) < today;
-    });
-
-
-    return res.json({ status: "Success", events: attendedEvents });
-  } catch (err) {
-    console.error(err);
-    return res
-      .status(500)
-      .json({ status: "Error", message: "Failed to fetch attended events" });
-  }
+    return res.json({ status: "Success", events: attendedEvents });
+  } catch (err) {
+    console.error(err);
+    return res
+      .status(500)
+      .json({ status: "Error", message: "Failed to fetch attended events" });
+  }
 });
+
+
+
+
 
 
 // --------------------- VENUES ---------------------
@@ -1546,7 +1537,6 @@ app.get("/users/:userId/payments", authenticateToken, async (req, res) => {
 app.get(
   "/events/:eventId/payments",
   authenticateToken,
-  isAdminOrOrganizer,
   async (req, res) => {
     try {
       const { eventId } = req.params;
