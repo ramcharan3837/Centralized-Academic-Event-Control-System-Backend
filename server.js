@@ -9,6 +9,31 @@ const crypto = require('crypto');
 require("dotenv").config();
 
 
+// ========================================
+// EMAIL CONFIGURATION
+// ========================================
+const nodemailer = require('nodemailer');
+const cron = require('node-cron');
+
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASSWORD
+  }
+});
+
+// Verify transporter configuration
+transporter.verify((error, success) => {
+  if (error) {
+    console.error('❌ Email configuration error:', error.message);
+    console.error('Please check EMAIL_USER and EMAIL_PASSWORD in .env file');
+  } else {
+    console.log('✅ Email server is ready to send messages');
+  }
+});
+
+
 const app = express();
 app.use(cors());
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -86,6 +111,10 @@ async function initializeDatabase() {
     // inside initializeDatabase, after other collections
     const venuesCollection = db.collection("venues");
     await venuesCollection.createIndex({ name: 1 }, { unique: true });
+// Add this to initializeDatabase function
+const otpCollection = db.collection("password_reset_otps");
+await otpCollection.createIndex({ email: 1 });
+await otpCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 600 }); // OTP expires after 10 minutes
 
 
 
@@ -120,6 +149,7 @@ async function initializeDatabase() {
         password: "organizer123",
         approved: true,
       },
+
     ];
 
 
@@ -182,60 +212,339 @@ async function createNotification({ userId, eventId, type, title, message }) {
 
 // --------------------- USER & ORGANIZER ---------------------
 
+const otpStore = new Map(); // Format: { email: { otp, expiresAt, userData } }
 
+// Helper function to generate 6-digit OTP
+const generateOTP = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+// Helper function to validate strong password
+const validatePassword = (password) => {
+  // Minimum 8 characters, at least one uppercase, one lowercase, one number, one special character
+  const minLength = password.length >= 8;
+  const hasUpperCase = /[A-Z]/.test(password);
+  const hasLowerCase = /[a-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+  
+  return {
+    isValid: minLength && hasUpperCase && hasLowerCase && hasNumber && hasSpecialChar,
+    errors: {
+      minLength,
+      hasUpperCase,
+      hasLowerCase,
+      hasNumber,
+      hasSpecialChar
+    }
+  };
+};
+
+// Helper function to send OTP email
+const sendOTPEmail = async (email, otp, fullName) => {
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: 'Email Verification - Event Management System',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f4f4f4;">
+        <div style="background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: #2563eb; margin: 0;">Email Verification</h1>
+          </div>
+          
+          <p style="color: #333; font-size: 16px; line-height: 1.6;">
+            Hello <strong>${fullName}</strong>,
+          </p>
+          
+          <p style="color: #333; font-size: 16px; line-height: 1.6;">
+            Thank you for registering with our Event Management System! To complete your registration, please use the following One-Time Password (OTP):
+          </p>
+          
+          <div style="background-color: #f0f7ff; border-left: 4px solid #2563eb; padding: 20px; margin: 30px 0; text-align: center;">
+            <p style="margin: 0; color: #666; font-size: 14px; margin-bottom: 10px;">Your OTP Code</p>
+            <h2 style="margin: 0; color: #2563eb; font-size: 36px; letter-spacing: 8px; font-family: 'Courier New', monospace;">
+              ${otp}
+            </h2>
+          </div>
+          
+          <p style="color: #666; font-size: 14px; line-height: 1.6;">
+            ⏰ This OTP will expire in <strong>10 minutes</strong>.
+          </p>
+          
+          <p style="color: #666; font-size: 14px; line-height: 1.6;">
+            If you didn't request this registration, please ignore this email.
+          </p>
+          
+          <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+          
+          <p style="color: #999; font-size: 12px; text-align: center;">
+            Event Management System<br>
+            This is an automated email, please do not reply.
+          </p>
+        </div>
+      </div>
+    `
+  };
+
+  return transporter.sendMail(mailOptions);
+};
 // Register endpoint
 app.post("/register", async (req, res) => {
-  try {
-    const { fullName, rollNumber, branch, role, email, password } = req.body;
-    if (!fullName || !rollNumber || !branch || !role || !email || !password) {
-      return res
-        .status(400)
-        .json({ status: "Error", message: "All fields are required" });
-    }
+  try {
+    const { fullName, rollNumber, branch, role, email, password, otp, step } = req.body;
 
+    // ================================================
+    // STEP 1: Request OTP (Initial Registration)
+    // ================================================
+    if (step === 'request-otp') {
+      // Validate required fields
+      if (!fullName || !rollNumber || !branch || !role || !email || !password) {
+        return res.status(400).json({ 
+          status: "Error", 
+          message: "All fields are required" 
+        });
+      }
 
-    const db = client.db("project_event_db");
-    const usersCollection = db.collection("users");
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({ 
+          status: "Error", 
+          message: "Invalid email format" 
+        });
+      }
 
+      // Validate strong password
+      const passwordValidation = validatePassword(password);
+      if (!passwordValidation.isValid) {
+        let errorMessage = "Password must contain: ";
+        const errors = [];
+        if (!passwordValidation.errors.minLength) errors.push("at least 8 characters");
+        if (!passwordValidation.errors.hasUpperCase) errors.push("one uppercase letter");
+        if (!passwordValidation.errors.hasLowerCase) errors.push("one lowercase letter");
+        if (!passwordValidation.errors.hasNumber) errors.push("one number");
+        if (!passwordValidation.errors.hasSpecialChar) errors.push("one special character (!@#$%^&*)");
+        
+        return res.status(400).json({ 
+          status: "Error", 
+          message: errorMessage + errors.join(", "),
+          passwordRequirements: passwordValidation.errors
+        });
+      }
 
-    const existingUser = await usersCollection.findOne({ email });
-    if (existingUser)
-      return res
-        .status(400)
-        .json({ status: "Error", message: "Email already exists" });
+      const db = client.db("project_event_db");
+      const usersCollection = db.collection("users");
 
+      // Check if email already exists
+      const existingUser = await usersCollection.findOne({ email });
+      if (existingUser) {
+        return res.status(400).json({ 
+          status: "Error", 
+          message: "Email already exists" 
+        });
+      }
 
-    let approved = role === "user";
+      // Generate OTP
+      const generatedOTP = generateOTP();
+      const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
 
+      // Store OTP and user data temporarily
+      otpStore.set(email, {
+        otp: generatedOTP,
+        expiresAt,
+        userData: {
+          fullName,
+          rollNumber,
+          branch,
+          role,
+          email,
+          password,
+        }
+      });
 
-    const newUser = {
-      fullName,
-      rollNumber,
-      branch,
-      role,
-      email,
-      password: password,
-      approved,
-      createdAt: new Date(),
-    };
+      // Send OTP email
+      try {
+        await sendOTPEmail(email, generatedOTP, fullName);
+      } catch (emailError) {
+        console.error("Error sending email:", emailError);
+        otpStore.delete(email);
+        return res.status(500).json({ 
+          status: "Error", 
+          message: "Failed to send verification email. Please check your email address and try again." 
+        });
+      }
 
+      // Clean up expired OTPs
+      for (const [key, value] of otpStore.entries()) {
+        if (value.expiresAt < Date.now()) {
+          otpStore.delete(key);
+        }
+      }
 
-    await usersCollection.insertOne(newUser);
+      return res.status(200).json({
+        status: "Success",
+        message: "OTP sent to your email. Please verify within 10 minutes.",
+        requireOTP: true,
+        email: email
+      });
+    }
 
+    // ================================================
+    // STEP 2: Verify OTP and Complete Registration
+    // ================================================
+    if (step === 'verify-otp') {
+      if (!email || !otp) {
+        return res.status(400).json({ 
+          status: "Error", 
+          message: "Email and OTP are required" 
+        });
+      }
 
-    res
-      .status(200)
-      .json({
-        status: "Success",
-        message: `${role} registered successfully`,
-      });
-  } catch (err) {
-    console.error(err);
-    res
-      .status(500)
-      .json({ status: "Error", message: "Registration failed" });
-  }
+      // Check if OTP exists for this email
+      const otpData = otpStore.get(email);
+      if (!otpData) {
+        return res.status(400).json({ 
+          status: "Error", 
+          message: "OTP not found or expired. Please request a new OTP." 
+        });
+      }
+
+      // Check if OTP is expired
+      if (otpData.expiresAt < Date.now()) {
+        otpStore.delete(email);
+        return res.status(400).json({ 
+          status: "Error", 
+          message: "OTP has expired. Please request a new OTP." 
+        });
+      }
+
+      // Verify OTP
+      if (otpData.otp !== otp.trim()) {
+        return res.status(400).json({ 
+          status: "Error", 
+          message: "Invalid OTP. Please check and try again." 
+        });
+      }
+
+      // OTP is valid, proceed with registration
+      const db = client.db("project_event_db");
+      const usersCollection = db.collection("users");
+
+      const { userData } = otpData;
+
+      // Double-check if email exists
+      const existingUser = await usersCollection.findOne({ email: userData.email });
+      if (existingUser) {
+        otpStore.delete(email);
+        return res.status(400).json({ 
+          status: "Error", 
+          message: "Email already exists" 
+        });
+      }
+
+      // Determine approval status
+      let approved = userData.role === "user";
+
+      // Create new user
+      const newUser = {
+        fullName: userData.fullName,
+        rollNumber: userData.rollNumber,
+        branch: userData.branch,
+        role: userData.role,
+        email: userData.email,
+        password: userData.password,
+        approved,
+        emailVerified: true,
+        createdAt: new Date(),
+      };
+
+      await usersCollection.insertOne(newUser);
+
+      // Delete OTP from store
+      otpStore.delete(email);
+
+      return res.status(200).json({
+        status: "Success",
+        message: `Registration successful! ${userData.role === 'organizer' ? 'Please wait for admin approval before logging in.' : 'You can now login with your credentials.'}`,
+        emailVerified: true
+      });
+    }
+
+    // ================================================
+    // STEP 3: Resend OTP
+    // ================================================
+    if (step === 'resend-otp') {
+      if (!email) {
+        return res.status(400).json({ 
+          status: "Error", 
+          message: "Email is required" 
+        });
+      }
+
+      // Check if OTP exists for this email
+      const otpData = otpStore.get(email);
+      if (!otpData) {
+        return res.status(400).json({ 
+          status: "Error", 
+          message: "No pending registration found. Please start registration again." 
+        });
+      }
+
+      // Generate new OTP
+      const newOTP = generateOTP();
+      const expiresAt = Date.now() + 10 * 60 * 1000;
+
+      // Update OTP data
+      otpData.otp = newOTP;
+      otpData.expiresAt = expiresAt;
+      otpStore.set(email, otpData);
+
+      // Send new OTP email
+      try {
+        await sendOTPEmail(email, newOTP, otpData.userData.fullName);
+      } catch (emailError) {
+        console.error("Error sending email:", emailError);
+        return res.status(500).json({ 
+          status: "Error", 
+          message: "Failed to send verification email. Please try again." 
+        });
+      }
+
+      return res.status(200).json({
+        status: "Success",
+        message: "New OTP sent to your email.",
+        email: email
+      });
+    }
+
+    // If none of the above conditions match
+    return res.status(400).json({
+      status: "Error",
+      message: "Invalid request. Please specify the step (request-otp, verify-otp, or resend-otp)."
+    });
+
+  } catch (err) {
+    console.error("Registration error:", err);
+    res.status(500).json({ 
+      status: "Error", 
+      message: "Registration failed. Please try again." 
+    });
+  }
 });
+setInterval(() => {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [key, value] of otpStore.entries()) {
+    if (value.expiresAt < now) {
+      otpStore.delete(key);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) {
+    console.log(`✅ OTP cleanup: Removed ${cleaned} expired OTP(s). Active: ${otpStore.size}`);
+  }
+}, 15 * 60 * 1000);
 
 
 // Login endpoint
@@ -1709,3 +2018,979 @@ const newEvent = {
   createdAt: new Date(),
 };
 */
+
+// ========================================
+// NEW ROUTES TO ADD TO YOUR server.js
+// Add these at the end of your server.js file (before app.listen)
+// ========================================
+
+// First, add these requires at the top of your server.js:
+// const nodemailer = require('nodemailer');
+// const cron = require('node-cron');
+// const createCsvWriter = require('csv-writer').createObjectCsvWriter;
+// const multer = require('multer');
+// const fs = require('fs');
+// const path = require('path');
+
+
+// ========================================
+// EMAIL ROUTES
+// ========================================
+
+// Send email to registered users for a specific event
+app.post('/send-email-registered/:eventId', authenticateToken, async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { subject, message } = req.body;
+
+    const db = client.db("project_event_db");
+    const eventsCollection = db.collection("events");
+    const registrationsCollection = db.collection("registrations");
+    const usersCollection = db.collection("users");
+
+    const event = await eventsCollection.findOne({ _id: new ObjectId(eventId) });
+    if (!event) {
+      return res.status(404).json({ status: 'Error', message: 'Event not found' });
+    }
+
+    const registrations = await registrationsCollection.find({ 
+      eventId: new ObjectId(eventId) 
+    }).toArray();
+
+    if (registrations.length === 0) {
+      return res.status(404).json({ status: 'Error', message: 'No registered users found' });
+    }
+
+    const userIds = registrations.map(r => r.userId);
+    const users = await usersCollection.find({ 
+      _id: { $in: userIds } 
+    }).toArray();
+
+    const emailPromises = users.map(user => {
+      const mailOptions = {
+        from: process.env.EMAIL_USER,
+        to: user.email,
+        subject: subject || `Reminder: ${event.name}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #2563eb;">Event Reminder</h2>
+            <p>Dear ${user.fullName},</p>
+            <p>${message || 'This is a reminder about your registered event.'}</p>
+            <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0;">
+              <h3 style="color: #1f2937; margin-top: 0;">Event Details:</h3>
+              <ul style="list-style: none; padding: 0;">
+                <li><strong>Event:</strong> ${event.name}</li>
+                <li><strong>Date:</strong> ${event.date}</li>
+                <li><strong>Venue:</strong> ${event.venue}</li>
+                <li><strong>Description:</strong> ${event.shortDesc || ''}</li>
+              </ul>
+            </div>
+            <p>We look forward to seeing you!</p>
+            <p style="color: #6b7280;">Best regards,<br>Event Management Team</p>
+          </div>
+        `
+      };
+      return transporter.sendMail(mailOptions);
+    });
+
+    await Promise.all(emailPromises);
+
+    res.json({ 
+      status: 'Success', 
+      message: `Email sent to ${users.length} registered users` 
+    });
+
+  } catch (error) {
+    console.error('Error sending emails:', error);
+    res.status(500).json({ status: 'Error', message: 'Failed to send emails' });
+  }
+});
+
+// Send email to all users in database
+app.post('/send-email-all', authenticateToken, isAdminOrOrganizer, async (req, res) => {
+  try {
+    const { subject, message, eventId } = req.body;
+
+    const db = client.db("project_event_db");
+    const usersCollection = db.collection("users");
+    const eventsCollection = db.collection("events");
+
+    const users = await usersCollection.find({}).toArray();
+    
+    if (users.length === 0) {
+      return res.status(404).json({ status: 'Error', message: 'No users found' });
+    }
+
+    let eventDetails = '';
+    if (eventId) {
+      const event = await eventsCollection.findOne({ _id: new ObjectId(eventId) });
+      if (event) {
+        eventDetails = `
+          <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <h3 style="color: #1f2937; margin-top: 0;">Event Details:</h3>
+            <ul style="list-style: none; padding: 0;">
+              <li><strong>Event:</strong> ${event.name}</li>
+              <li><strong>Date:</strong> ${event.date}</li>
+              <li><strong>Venue:</strong> ${event.venue}</li>
+              <li><strong>Description:</strong> ${event.shortDesc || ''}</li>
+            </ul>
+          </div>
+        `;
+      }
+    }
+
+    const emailPromises = users.map(user => {
+      const mailOptions = {
+        from: process.env.EMAIL_USER,
+        to: user.email,
+        subject: subject || 'Event Announcement',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #2563eb;">Event Announcement</h2>
+            <p>Dear ${user.fullName},</p>
+            <p>${message || 'We have an exciting event coming up!'}</p>
+            ${eventDetails}
+            <p style="color: #6b7280;">Best regards,<br>Event Management Team</p>
+          </div>
+        `
+      };
+      return transporter.sendMail(mailOptions);
+    });
+
+    await Promise.all(emailPromises);
+
+    res.json({ 
+      status: 'Success', 
+      message: `Email sent to ${users.length} users` 
+    });
+
+  } catch (error) {
+    console.error('Error sending emails:', error);
+    res.status(500).json({ status: 'Error', message: 'Failed to send emails' });
+  }
+});
+
+// ========================================
+// AUTOMATED REMINDER SCHEDULER
+// ========================================
+function setupAutomatedReminders() {
+  cron.schedule('0 * * * *', async () => {
+    try {
+      const now = new Date();
+      const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+      const dayAfterTomorrow = new Date(now.getTime() + 25 * 60 * 60 * 1000);
+
+      const db = client.db("project_event_db");
+      const eventsCollection = db.collection("events");
+      const registrationsCollection = db.collection("registrations");
+      const usersCollection = db.collection("users");
+
+      const upcomingEvents = await eventsCollection.find({
+        date: {
+          $gte: tomorrow.toISOString().split('T')[0],
+          $lt: dayAfterTomorrow.toISOString().split('T')[0]
+        },
+        reminderSent: { $ne: true }
+      }).toArray();
+
+      for (const event of upcomingEvents) {
+        const registrations = await registrationsCollection.find({ 
+          eventId: event._id 
+        }).toArray();
+
+        if (registrations.length > 0) {
+          const userIds = registrations.map(r => r.userId);
+          const users = await usersCollection.find({ 
+            _id: { $in: userIds } 
+          }).toArray();
+
+          const emailPromises = users.map(user => {
+            const mailOptions = {
+              from: process.env.EMAIL_USER,
+              to: user.email,
+              subject: `Reminder: ${event.name} - Tomorrow!`,
+              html: `
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                  <h2 style="color: #2563eb;">Event Reminder - Tomorrow!</h2>
+                  <p>Dear ${user.fullName},</p>
+                  <p>This is a friendly reminder that you're registered for the following event happening <strong>tomorrow</strong>:</p>
+                  <div style="background-color: #f3f4f6; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                    <h3 style="color: #1f2937; margin-top: 0;">Event Details:</h3>
+                    <ul style="list-style: none; padding: 0;">
+                      <li><strong>Event:</strong> ${event.name}</li>
+                      <li><strong>Date:</strong> ${event.date}</li>
+                      <li><strong>Venue:</strong> ${event.venue}</li>
+                      <li><strong>Description:</strong> ${event.shortDesc || ''}</li>
+                    </ul>
+                  </div>
+                  <p>Please make sure to arrive on time. We look forward to seeing you!</p>
+                  <p style="color: #6b7280;">Best regards,<br>Event Management Team</p>
+                </div>
+              `
+            };
+            return transporter.sendMail(mailOptions);
+          });
+
+          await Promise.all(emailPromises);
+
+          await eventsCollection.updateOne(
+            { _id: event._id },
+            { $set: { reminderSent: true } }
+          );
+
+          console.log(`Automated reminder sent for event: ${event.name} to ${users.length} users`);
+        }
+      }
+
+    } catch (error) {
+      console.error('Error in automated reminder:', error);
+    }
+  });
+
+  console.log('✅ Automated reminder scheduler started - checking every hour');
+}
+
+// ========================================
+// CSV DOWNLOAD ROUTES
+// ========================================
+const createCsvWriter = require('csv-writer').createObjectCsvWriter;
+const fs = require('fs');
+const path = require('path');
+
+// Download all users as CSV
+app.get('/download-users-csv', authenticateToken, isAdminOrOrganizer, async (req, res) => {
+  try {
+    const db = client.db("project_event_db");
+    const usersCollection = db.collection("users");
+
+    const users = await usersCollection.find({}).toArray();
+
+    if (users.length === 0) {
+      return res.status(404).json({ status: 'Error', message: 'No users found' });
+    }
+
+    const csvFilePath = path.join(__dirname, `all-users-${Date.now()}.csv`);
+
+    const csvWriter = createCsvWriter({
+      path: csvFilePath,
+      header: [
+        { id: 'id', title: 'User ID' },
+        { id: 'fullName', title: 'Full Name' },
+        { id: 'email', title: 'Email' },
+        { id: 'rollNumber', title: 'Roll Number' },
+        { id: 'branch', title: 'Branch' },
+        { id: 'role', title: 'Role' },
+        { id: 'approved', title: 'Approved' },
+        { id: 'createdAt', title: 'Created At' }
+      ]
+    });
+
+    const userData = users.map(user => ({
+      id: user._id.toString(),
+      fullName: user.fullName || '',
+      email: user.email || '',
+      rollNumber: user.rollNumber || '',
+      branch: user.branch || '',
+      role: user.role || '',
+      approved: user.approved ? 'Yes' : 'No',
+      createdAt: user.createdAt ? new Date(user.createdAt).toLocaleDateString() : ''
+    }));
+
+    await csvWriter.writeRecords(userData);
+
+    res.download(csvFilePath, `all-users-${Date.now()}.csv`, (err) => {
+      if (err) console.error('Error downloading file:', err);
+      fs.unlinkSync(csvFilePath);
+    });
+
+  } catch (error) {
+    console.error('Error generating CSV:', error);
+    res.status(500).json({ status: 'Error', message: 'Failed to generate CSV' });
+  }
+});
+
+// Download event-specific users as CSV
+app.get('/download-event-users-csv/:eventId', authenticateToken, isAdminOrOrganizer, async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    const db = client.db("project_event_db");
+    const eventsCollection = db.collection("events");
+    const registrationsCollection = db.collection("registrations");
+    const usersCollection = db.collection("users");
+
+    const event = await eventsCollection.findOne({ _id: new ObjectId(eventId) });
+    if (!event) {
+      return res.status(404).json({ status: 'Error', message: 'Event not found' });
+    }
+
+    const registrations = await registrationsCollection.find({ 
+      eventId: new ObjectId(eventId) 
+    }).toArray();
+
+    if (registrations.length === 0) {
+      return res.status(404).json({ status: 'Error', message: 'No registered users found' });
+    }
+
+    const userIds = registrations.map(r => r.userId);
+    const users = await usersCollection.find({ 
+      _id: { $in: userIds } 
+    }).toArray();
+
+    const csvFilePath = path.join(__dirname, `event-${eventId}-users-${Date.now()}.csv`);
+
+    const csvWriter = createCsvWriter({
+      path: csvFilePath,
+      header: [
+        { id: 'eventName', title: 'Event Name' },
+        { id: 'eventDate', title: 'Event Date' },
+        { id: 'fullName', title: 'Full Name' },
+        { id: 'email', title: 'Email' },
+        { id: 'rollNumber', title: 'Roll Number' },
+        { id: 'branch', title: 'Branch' },
+        { id: 'registeredAt', title: 'Registration Date' }
+      ]
+    });
+
+    const registrationData = registrations.map(reg => {
+      const user = users.find(u => u._id.toString() === reg.userId.toString());
+      return {
+        eventName: event.name,
+        eventDate: event.date,
+        fullName: user?.fullName || '',
+        email: user?.email || '',
+        rollNumber: user?.rollNumber || '',
+        branch: user?.branch || '',
+        registeredAt: reg.registeredAt ? new Date(reg.registeredAt).toLocaleDateString() : ''
+      };
+    });
+
+    await csvWriter.writeRecords(registrationData);
+
+    res.download(csvFilePath, `${event.name}-users-${Date.now()}.csv`, (err) => {
+      if (err) console.error('Error downloading file:', err);
+      fs.unlinkSync(csvFilePath);
+    });
+
+  } catch (error) {
+    console.error('Error generating CSV:', error);
+    res.status(500).json({ status: 'Error', message: 'Failed to generate CSV' });
+  }
+});
+
+// Download all events with stats as CSV
+app.get('/download-events-csv', authenticateToken, isAdminOrOrganizer, async (req, res) => {
+  try {
+    const db = client.db("project_event_db");
+    const eventsCollection = db.collection("events");
+    const registrationsCollection = db.collection("registrations");
+
+    const events = await eventsCollection.find({}).toArray();
+
+    if (events.length === 0) {
+      return res.status(404).json({ status: 'Error', message: 'No events found' });
+    }
+
+    const eventsWithCounts = await Promise.all(
+      events.map(async (event) => {
+        const registrationCount = await registrationsCollection.countDocuments({ 
+          eventId: event._id 
+        });
+        return {
+          id: event._id.toString(),
+          name: event.name || '',
+          date: event.date || '',
+          venue: event.venue || '',
+          strength: event.strength || 0,
+          registrations: registrationCount,
+          approved: event.approved ? 'Yes' : 'No',
+          createdBy: event.createdBy?.fullName || '',
+          createdAt: event.createdAt ? new Date(event.createdAt).toLocaleDateString() : ''
+        };
+      })
+    );
+
+    const csvFilePath = path.join(__dirname, `all-events-${Date.now()}.csv`);
+
+    const csvWriter = createCsvWriter({
+      path: csvFilePath,
+      header: [
+        { id: 'id', title: 'Event ID' },
+        { id: 'name', title: 'Event Name' },
+        { id: 'date', title: 'Date' },
+        { id: 'venue', title: 'Venue' },
+        { id: 'strength', title: 'Capacity' },
+        { id: 'registrations', title: 'Registered Users' },
+        { id: 'approved', title: 'Approved' },
+        { id: 'createdBy', title: 'Created By' },
+        { id: 'createdAt', title: 'Created At' }
+      ]
+    });
+
+    await csvWriter.writeRecords(eventsWithCounts);
+
+    res.download(csvFilePath, `all-events-${Date.now()}.csv`, (err) => {
+      if (err) console.error('Error downloading file:', err);
+      fs.unlinkSync(csvFilePath);
+    });
+
+  } catch (error) {
+    console.error('Error generating CSV:', error);
+    res.status(500).json({ status: 'Error', message: 'Failed to generate CSV' });
+  }
+});
+
+// ========================================
+// SPONSOR IMAGE ROUTES
+// ========================================
+const multer = require('multer');
+
+// Configure multer for sponsor images
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadPath = path.join(__dirname, 'public', 'sponsors');
+    if (!fs.existsSync(uploadPath)) {
+      fs.mkdirSync(uploadPath, { recursive: true });
+    }
+    cb(null, uploadPath);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'sponsor-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: function (req, file, cb) {
+    const allowedTypes = /jpeg|jpg|png|gif|webp/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed!'));
+    }
+  }
+});
+
+// Serve static files (add this if not already present)
+app.use('/sponsors', express.static(path.join(__dirname, 'public', 'sponsors')));
+
+// Upload sponsor image
+app.post('/sponsors/upload', authenticateToken, isAdminOrOrganizer, upload.single('sponsorImage'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ status: 'Error', message: 'No file uploaded' });
+    }
+
+    const db = client.db("project_event_db");
+    const sponsorsCollection = db.collection("sponsors");
+
+    const sponsor = {
+      filename: req.file.filename,
+      originalName: req.file.originalname,
+      path: req.file.path,
+      url: `/sponsors/${req.file.filename}`,
+      fullUrl: `${req.protocol}://${req.get('host')}/sponsors/${req.file.filename}`,
+      uploadedBy: new ObjectId(req.user.userId),
+      uploadedAt: new Date(),
+      isActive: true,
+      order: await sponsorsCollection.countDocuments()
+    };
+
+    const result = await sponsorsCollection.insertOne(sponsor);
+
+    res.json({
+      status: 'Success',
+      message: 'Sponsor image uploaded successfully',
+      sponsor: {
+        id: result.insertedId,
+        filename: sponsor.filename,
+        url: sponsor.url,
+        fullUrl: sponsor.fullUrl,
+        uploadedAt: sponsor.uploadedAt
+      }
+    });
+
+  } catch (error) {
+    console.error('Error uploading sponsor image:', error);
+    res.status(500).json({ status: 'Error', message: 'Failed to upload image' });
+  }
+});
+
+// Upload multiple sponsor images
+app.post('/sponsors/upload-multiple', authenticateToken, isAdminOrOrganizer, upload.array('sponsorImages', 10), async (req, res) => {
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ status: 'Error', message: 'No files uploaded' });
+    }
+
+    const db = client.db("project_event_db");
+    const sponsorsCollection = db.collection("sponsors");
+
+    const currentCount = await sponsorsCollection.countDocuments();
+
+    const sponsors = req.files.map((file, index) => ({
+      filename: file.filename,
+      originalName: file.originalname,
+      path: file.path,
+      url: `/sponsors/${file.filename}`,
+      uploadedBy: new ObjectId(req.user.userId),
+      uploadedAt: new Date(),
+      isActive: true,
+      order: currentCount + index
+    }));
+
+    const result = await sponsorsCollection.insertMany(sponsors);
+
+    res.json({
+      status: 'Success',
+      message: `${sponsors.length} sponsor images uploaded successfully`,
+      sponsors: sponsors.map((s, i) => ({
+        id: result.insertedIds[i],
+        filename: s.filename,
+        url: s.url,
+        uploadedAt: s.uploadedAt
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error uploading sponsor images:', error);
+    res.status(500).json({ status: 'Error', message: 'Failed to upload images' });
+  }
+});
+
+// Get all sponsor images
+app.get('/sponsors', async (req, res) => {
+  try {
+    const db = client.db("project_event_db");
+    const sponsorsCollection = db.collection("sponsors");
+
+    const sponsors = await sponsorsCollection
+      .find({ isActive: true })
+      .sort({ order: 1 })
+      .toArray();
+
+    // Add fullUrl for sponsors that don't have it
+   const sponsorsWithUrls = sponsors.map(sponsor => {
+      // Remove leading slash from url if it exists to prevent double slash
+      const cleanUrl = sponsor.url?.startsWith('/') ? sponsor.url.substring(1) : sponsor.url;
+      
+      return {
+        ...sponsor,
+        url: cleanUrl || `sponsors/${sponsor.filename}`,
+        fullUrl: sponsor.fullUrl || `${req.protocol}://${req.get('host')}/sponsors/${sponsor.filename}`
+      };
+    });
+
+    res.json({
+      status: 'Success',
+      sponsors: sponsorsWithUrls
+    });
+
+  } catch (error) {
+    console.error('Error fetching sponsors:', error);
+    res.status(500).json({ status: 'Error', message: 'Failed to fetch sponsors' });
+  }
+});
+
+// Delete sponsor image
+app.delete('/sponsors/:sponsorId', authenticateToken, isAdminOrOrganizer, async (req, res) => {
+  try {
+    const { sponsorId } = req.params;
+
+    const db = client.db("project_event_db");
+    const sponsorsCollection = db.collection("sponsors");
+
+    const sponsor = await sponsorsCollection.findOne({ _id: new ObjectId(sponsorId) });
+    if (!sponsor) {
+      return res.status(404).json({ status: 'Error', message: 'Sponsor image not found' });
+    }
+
+    const filePath = path.join(__dirname, 'public', 'sponsors', sponsor.filename);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+
+    await sponsorsCollection.deleteOne({ _id: new ObjectId(sponsorId) });
+
+    res.json({
+      status: 'Success',
+      message: 'Sponsor image deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Error deleting sponsor image:', error);
+    res.status(500).json({ status: 'Error', message: 'Failed to delete sponsor image' });
+  }
+});
+
+// Toggle sponsor active status
+app.put('/sponsors/:sponsorId/toggle', authenticateToken, isAdminOrOrganizer, async (req, res) => {
+  try {
+    const { sponsorId } = req.params;
+
+    const db = client.db("project_event_db");
+    const sponsorsCollection = db.collection("sponsors");
+
+    const sponsor = await sponsorsCollection.findOne({ _id: new ObjectId(sponsorId) });
+    if (!sponsor) {
+      return res.status(404).json({ status: 'Error', message: 'Sponsor image not found' });
+    }
+
+    const newStatus = !sponsor.isActive;
+    await sponsorsCollection.updateOne(
+      { _id: new ObjectId(sponsorId) },
+      { $set: { isActive: newStatus } }
+    );
+
+    res.json({
+      status: 'Success',
+      message: `Sponsor image ${newStatus ? 'activated' : 'deactivated'} successfully`,
+      isActive: newStatus
+    });
+
+  } catch (error) {
+    console.error('Error toggling sponsor status:', error);
+    res.status(500).json({ status: 'Error', message: 'Failed to toggle sponsor status' });
+  }
+});
+
+// ========================================
+// CALL THIS AFTER DATABASE INITIALIZATION
+// Add this line inside initializeDatabase() function after line 153:
+// setupAutomatedReminders();
+// ========================================
+
+// --------------------- FORGOT PASSWORD ENDPOINTS ---------------------
+
+// Step 1: Send OTP to email
+app.post('/forgot-password/send-otp', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    console.log('📧 Forgot password: Send OTP requested for:', email);
+
+    if (!email) {
+      return res.status(400).json({
+        status: 'Error',
+        message: 'Email is required'
+      });
+    }
+
+    const db = client.db('project_event_db');
+    const usersCollection = db.collection('users');
+    const otpCollection = db.collection('password_reset_otps');
+
+    // Check if user exists
+    const user = await usersCollection.findOne({ email });
+    if (!user) {
+      console.log('❌ User not found:', email);
+      return res.status(404).json({
+        status: 'Error',
+        message: 'No account found with this email address'
+      });
+    }
+
+    console.log('✅ User found:', user.fullName);
+
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log('🔑 Generated OTP:', otp);
+
+    // Store OTP in database (will auto-expire after 10 minutes)
+    await otpCollection.updateOne(
+      { email },
+      {
+        $set: {
+          email,
+          otp,
+          createdAt: new Date(),
+          verified: false
+        }
+      },
+      { upsert: true }
+    );
+
+    // Send OTP via email
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Password Reset OTP - Event Management System',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px; text-align: center;">
+            <h1 style="color: white; margin: 0;">Password Reset</h1>
+          </div>
+          
+          <div style="background-color: #f7fafc; padding: 30px; border-radius: 10px; margin-top: 20px;">
+            <p style="font-size: 16px; color: #2d3748;">Hello <strong>${user.fullName}</strong>,</p>
+            
+            <p style="font-size: 16px; color: #2d3748;">
+              We received a request to reset your password. Use the OTP below to continue:
+            </p>
+            
+            <div style="background-color: white; border: 2px dashed #667eea; border-radius: 10px; padding: 20px; text-align: center; margin: 30px 0;">
+              <p style="font-size: 14px; color: #718096; margin-bottom: 10px;">Your OTP Code</p>
+              <h2 style="font-size: 36px; color: #667eea; letter-spacing: 8px; margin: 0; font-weight: bold;">
+                ${otp}
+              </h2>
+            </div>
+            
+            <p style="font-size: 14px; color: #e53e3e; margin-top: 20px;">
+              ⏰ This OTP will expire in <strong>10 minutes</strong>
+            </p>
+            
+            <p style="font-size: 14px; color: #718096; margin-top: 20px;">
+              If you didn't request this, please ignore this email and your password will remain unchanged.
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+            <p style="font-size: 12px; color: #a0aec0;">
+              Event Management System<br>
+              This is an automated email, please do not reply.
+            </p>
+          </div>
+        </div>
+      `
+    };
+
+    await transporter.sendMail(mailOptions);
+
+    console.log('✅ OTP email sent successfully');
+
+    res.json({
+      status: 'Success',
+      message: 'OTP sent to your email address'
+    });
+
+  } catch (error) {
+    console.error('❌ Error sending OTP:', error);
+    res.status(500).json({
+      status: 'Error',
+      message: 'Failed to send OTP. Please try again.',
+      details: error.message
+    });
+  }
+});
+
+// Step 2: Verify OTP
+app.post('/forgot-password/verify-otp', async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    console.log('🔑 Verify OTP requested for:', email);
+
+    if (!email || !otp) {
+      return res.status(400).json({
+        status: 'Error',
+        message: 'Email and OTP are required'
+      });
+    }
+
+    const db = client.db('project_event_db');
+    const otpCollection = db.collection('password_reset_otps');
+
+    // Find OTP record
+    const otpRecord = await otpCollection.findOne({ email });
+
+    if (!otpRecord) {
+      console.log('❌ No OTP found for email:', email);
+      return res.status(404).json({
+        status: 'Error',
+        message: 'No OTP found. Please request a new one.'
+      });
+    }
+
+    // Check if OTP is expired (10 minutes)
+    const otpAge = Date.now() - new Date(otpRecord.createdAt).getTime();
+    const tenMinutes = 10 * 60 * 1000;
+
+    if (otpAge > tenMinutes) {
+      console.log('❌ OTP expired for:', email);
+      await otpCollection.deleteOne({ email });
+      return res.status(400).json({
+        status: 'Error',
+        message: 'OTP expired. Please request a new one.'
+      });
+    }
+
+    // Check if OTP matches
+    if (otpRecord.otp !== otp) {
+      console.log('❌ Invalid OTP for:', email);
+      return res.status(400).json({
+        status: 'Error',
+        message: 'Invalid OTP. Please try again.'
+      });
+    }
+
+    // Mark OTP as verified
+    await otpCollection.updateOne(
+      { email },
+      { $set: { verified: true } }
+    );
+
+    console.log('✅ OTP verified successfully for:', email);
+
+    res.json({
+      status: 'Success',
+      message: 'OTP verified successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ Error verifying OTP:', error);
+    res.status(500).json({
+      status: 'Error',
+      message: 'Failed to verify OTP',
+      details: error.message
+    });
+  }
+});
+
+// Step 3: Reset Password
+app.post('/forgot-password/reset-password', async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    console.log('🔒 Reset password requested for:', email);
+
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        status: 'Error',
+        message: 'Email, OTP, and new password are required'
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        status: 'Error',
+        message: 'Password must be at least 6 characters long'
+      });
+    }
+
+    const db = client.db('project_event_db');
+    const usersCollection = db.collection('users');
+    const otpCollection = db.collection('password_reset_otps');
+
+    // Verify OTP is verified
+    const otpRecord = await otpCollection.findOne({ email });
+
+    if (!otpRecord) {
+      console.log('❌ No OTP record found');
+      return res.status(404).json({
+        status: 'Error',
+        message: 'Invalid session. Please restart the process.'
+      });
+    }
+
+    if (!otpRecord.verified) {
+      console.log('❌ OTP not verified');
+      return res.status(400).json({
+        status: 'Error',
+        message: 'Please verify OTP first'
+      });
+    }
+
+    if (otpRecord.otp !== otp) {
+      console.log('❌ OTP mismatch');
+      return res.status(400).json({
+        status: 'Error',
+        message: 'Invalid OTP'
+      });
+    }
+
+    // Update user password
+    // Note: In production, you should hash the password with bcrypt
+    const result = await usersCollection.updateOne(
+      { email },
+      { $set: { password: newPassword } }
+    );
+
+    if (result.matchedCount === 0) {
+      console.log('❌ User not found:', email);
+      return res.status(404).json({
+        status: 'Error',
+        message: 'User not found'
+      });
+    }
+
+    // Delete OTP record
+    await otpCollection.deleteOne({ email });
+
+    console.log('✅ Password reset successful for:', email);
+
+    // Send confirmation email
+    const user = await usersCollection.findOne({ email });
+    
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Password Reset Successful - Event Management System',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); padding: 30px; border-radius: 10px; text-align: center;">
+            <h1 style="color: white; margin: 0;">✅ Password Reset Successful</h1>
+          </div>
+          
+          <div style="background-color: #f7fafc; padding: 30px; border-radius: 10px; margin-top: 20px;">
+            <p style="font-size: 16px; color: #2d3748;">Hello <strong>${user.fullName}</strong>,</p>
+            
+            <p style="font-size: 16px; color: #2d3748;">
+              Your password has been successfully reset. You can now login with your new password.
+            </p>
+            
+            <div style="background-color: #d1fae5; border-left: 4px solid #10b981; padding: 15px; margin: 20px 0;">
+              <p style="font-size: 14px; color: #065f46; margin: 0;">
+                🔒 If you didn't make this change, please contact support immediately.
+              </p>
+            </div>
+          </div>
+          
+          <div style="text-align: center; margin-top: 30px;">
+            <a href="https://centralized-academic-event-control.onrender.com/login" 
+               style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                      color: white; 
+                      padding: 15px 40px; 
+                      text-decoration: none; 
+                      border-radius: 10px; 
+                      font-weight: bold;
+                      display: inline-block;">
+              Login Now
+            </a>
+          </div>
+          
+          <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+            <p style="font-size: 12px; color: #a0aec0;">
+              Event Management System<br>
+              This is an automated email, please do not reply.
+            </p>
+          </div>
+        </div>
+      `
+    };
+
+    try {
+      await transporter.sendMail(mailOptions);
+      console.log('✅ Confirmation email sent');
+    } catch (emailError) {
+      console.error('⚠️ Failed to send confirmation email:', emailError);
+      // Don't fail the request if email fails
+    }
+
+    res.json({
+      status: 'Success',
+      message: 'Password reset successful. Please login with your new password.'
+    });
+
+  } catch (error) {
+    console.error('❌ Error resetting password:', error);
+    res.status(500).json({
+      status: 'Error',
+      message: 'Failed to reset password',
+      details: error.message
+    });
+  }
+});
