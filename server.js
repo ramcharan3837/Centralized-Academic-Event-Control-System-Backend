@@ -127,6 +127,7 @@ await otpCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 600 }); 
 
 
     await usersCollection.createIndex({ email: 1 }, { unique: true });
+    setupAutomatedReminders()
 
 
     const predefinedAccounts = [
@@ -2118,7 +2119,7 @@ app.post('/send-email-registered/:eventId', authenticateToken, async (req, res) 
 
     const emailPromises = users.map(user => {
       const mailOptions = {
-        from: process.env.EMAIL_USER,
+        from: process.env.SENDGRID_FROM_EMAIL|| process.env.EMAIL_USER,
         to: user.email,
         subject: subject || `Reminder: ${event.name}`,
         html: `
@@ -2140,7 +2141,7 @@ app.post('/send-email-registered/:eventId', authenticateToken, async (req, res) 
           </div>
         `
       };
-      return transporter.sendMail(mailOptions);
+      return sgMail.send(mailOptions);
     });
 
     await Promise.all(emailPromises);
@@ -2191,7 +2192,7 @@ app.post('/send-email-all', authenticateToken, isAdminOrOrganizer, async (req, r
 
     const emailPromises = users.map(user => {
       const mailOptions = {
-        from: process.env.EMAIL_USER,
+        from: process.env.SENDGRID_FROM_EMAIL|| process.env.EMAIL_USER,
         to: user.email,
         subject: subject || 'Event Announcement',
         html: `
@@ -2204,7 +2205,7 @@ app.post('/send-email-all', authenticateToken, isAdminOrOrganizer, async (req, r
           </div>
         `
       };
-      return transporter.sendMail(mailOptions);
+      return sgMail.send(mailOptions);
     });
 
     await Promise.all(emailPromises);
@@ -2256,7 +2257,7 @@ function setupAutomatedReminders() {
 
           const emailPromises = users.map(user => {
             const mailOptions = {
-              from: process.env.EMAIL_USER,
+              from: process.env.SENDGRID_FROM_EMAIL || process.env.EMAIL_USER,
               to: user.email,
               subject: `Reminder: ${event.name} - Tomorrow!`,
               html: `
@@ -2278,7 +2279,7 @@ function setupAutomatedReminders() {
                 </div>
               `
             };
-            return transporter.sendMail(mailOptions);
+            return sgMail.send(mailOptions);
           });
 
           await Promise.all(emailPromises);
@@ -2808,7 +2809,49 @@ app.post('/forgot-password/send-otp', async (req, res) => {
       `
     };
 
-    await transporter.sendMail(mailOptions);
+    const msg = {
+  to: email,
+  from: process.env.SENDGRID_FROM_EMAIL || process.env.EMAIL_USER || 'noreply@college.com',
+  subject: 'Password Reset OTP - Event Management System',
+  html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px; text-align: center;">
+            <h1 style="color: white; margin: 0;">Password Reset</h1>
+          </div>
+          
+          <div style="background-color: #f7fafc; padding: 30px; border-radius: 10px; margin-top: 20px;">
+            <p style="font-size: 16px; color: #2d3748;">Hello <strong>${user.fullName}</strong>,</p>
+            
+            <p style="font-size: 16px; color: #2d3748;">
+              We received a request to reset your password. Use the OTP below to continue:
+            </p>
+            
+            <div style="background-color: white; border: 2px dashed #667eea; border-radius: 10px; padding: 20px; text-align: center; margin: 30px 0;">
+              <p style="font-size: 14px; color: #718096; margin-bottom: 10px;">Your OTP Code</p>
+              <h2 style="font-size: 36px; color: #667eea; letter-spacing: 8px; margin: 0; font-weight: bold;">
+                ${otp}
+              </h2>
+            </div>
+            
+            <p style="font-size: 14px; color: #e53e3e; margin-top: 20px;">
+              ⏰ This OTP will expire in <strong>10 minutes</strong>
+            </p>
+            
+            <p style="font-size: 14px; color: #718096; margin-top: 20px;">
+              If you didn't request this, please ignore this email and your password will remain unchanged.
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+            <p style="font-size: 12px; color: #a0aec0;">
+              Event Management System<br>
+              This is an automated email, please do not reply.
+            </p>
+          </div>
+        </div>
+      `
+};
+await sgMail.send(msg);
 
     console.log('✅ OTP email sent successfully');
 
