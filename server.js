@@ -7,7 +7,15 @@ const bcrypt = require("bcryptjs");
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
 require("dotenv").config();
+const sgMail = require('@sendgrid/mail');
 
+if (process.env.SENDGRID_API_KEY) {
+  sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+  console.log('✅ SendGrid API configured successfully');
+} else {
+  console.error('❌ WARNING: SENDGRID_API_KEY not found in environment variables!');
+  console.error('   Emails will NOT work. Please add SENDGRID_API_KEY to Render environment.');
+}
 
 // ========================================
 // EMAIL CONFIGURATION
@@ -242,9 +250,25 @@ const validatePassword = (password) => {
 
 // Helper function to send OTP email
 const sendOTPEmail = async (email, otp, fullName) => {
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
+  // Check if API key exists
+  if (!process.env.SENDGRID_API_KEY) {
+    console.error('❌ SENDGRID_API_KEY not configured');
+    throw new Error('Email service not configured. Please contact administrator.');
+  }
+
+  // Check if sender email exists
+  if (!process.env.EMAIL_USER) {
+    console.error('❌ EMAIL_USER not configured');
+    throw new Error('Email sender not configured. Please contact administrator.');
+  }
+
+  console.log(`📧 Sending OTP email to: ${email}`);
+  console.log(`📧 From: ${process.env.EMAIL_USER}`);
+  console.log(`📧 OTP: ${otp}`);
+
+  const msg = {
     to: email,
+    from: process.env.EMAIL_USER, // Must be your verified sender in SendGrid
     subject: 'Email Verification - Event Management System',
     html: `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f4f4f4;">
@@ -284,10 +308,36 @@ const sendOTPEmail = async (email, otp, fullName) => {
           </p>
         </div>
       </div>
-    `
+    `,
   };
 
-  return transporter.sendMail(mailOptions);
+  try {
+    const response = await sgMail.send(msg);
+    console.log('✅ Email sent successfully via SendGrid!');
+    console.log('📧 Response Status:', response[0].statusCode);
+    console.log('📧 Message ID:', response[0].headers['x-message-id']);
+    return response;
+  } catch (error) {
+    console.error('❌ SendGrid email error!');
+    console.error('Error Message:', error.message);
+    
+    if (error.response) {
+      console.error('Status Code:', error.response.statusCode);
+      console.error('Response Body:', JSON.stringify(error.response.body, null, 2));
+      
+      // Handle specific SendGrid errors
+      if (error.response.body.errors) {
+        error.response.body.errors.forEach(err => {
+          console.error('  - Error:', err.message);
+          console.error('    Field:', err.field);
+          console.error('    Help:', err.help);
+        });
+      }
+    }
+    
+    // Throw user-friendly error
+    throw new Error('Failed to send verification email. Please try again or contact support.');
+  }
 };
 // Register endpoint
 app.post("/register", async (req, res) => {
