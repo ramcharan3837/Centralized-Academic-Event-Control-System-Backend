@@ -1393,6 +1393,7 @@ app.post("/payment/create-order", authenticateToken, async (req, res) => {
 
     const db = client.db("project_event_db");
     const eventsCollection = db.collection("events");
+    const registrationsCollection = db.collection("registrations");
 
     // Check if event exists
     const event = await eventsCollection.findOne({
@@ -1404,6 +1405,21 @@ app.post("/payment/create-order", authenticateToken, async (req, res) => {
       return res.status(404).json({
         status: "Error",
         message: "Event not found or not approved",
+      });
+    }
+
+    // ✅ CHECK IF USER IS ALREADY REGISTERED FOR THIS EVENT
+    const existingRegistration = await registrationsCollection.findOne({
+      userId: new ObjectId(userId),
+      eventId: new ObjectId(eventId),
+    });
+
+    if (existingRegistration) {
+      console.log(`❌ User ${userId} already registered for event ${eventId}`);
+      return res.status(400).json({
+        status: "Error",
+        message: "Already registered for this event",
+        alreadyRegistered: true,
       });
     }
 
@@ -1420,6 +1436,8 @@ app.post("/payment/create-order", authenticateToken, async (req, res) => {
     };
 
     const order = await razorpay.orders.create(options);
+
+    console.log(`✅ Payment order created for user ${userId}, event ${eventId}`);
 
     res.status(200).json({
       status: "Success",
