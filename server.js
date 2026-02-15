@@ -37,11 +37,11 @@ const JWT_SECRET = process.env.JWT_SECRET;
 // MongoDB connection
 const uri = process.env.MONGO_URI;
 const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
 });
 
 
@@ -50,24 +50,24 @@ const client = new MongoClient(uri, {
 
 // Middleware to verify JWT token
 const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  if (!token) {
-    return res
-      .status(401)
-      .json({ status: "Error", message: "Access token required" });
-  }
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) {
+    return res
+      .status(401)
+      .json({ status: "Error", message: "Access token required" });
+  }
 
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res
-        .status(403)
-        .json({ status: "Error", message: "Invalid or expired token" });
-    }
-    req.user = user; // { email, role, userId }
-    next();
-  });
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res
+        .status(403)
+        .json({ status: "Error", message: "Invalid or expired token" });
+    }
+    req.user = user; // { email, role, userId }
+    next();
+  });
 };
 const razorpay = new Razorpay({
     key_id: process.env.RAZORPAY_KEY_ID,
@@ -76,31 +76,31 @@ const razorpay = new Razorpay({
 
 // Middleware to check if user is admin or organizer
 const isAdminOrOrganizer = (req, res, next) => {
-  if (req.user.role !== "admin" && req.user.role !== "organizer") {
-    return res.status(403).json({
-      status: "Error",
-      message: "Admin or organizer access required",
-    });
-  }
-  next();
+  if (req.user.role !== "admin" && req.user.role !== "organizer") {
+    return res.status(403).json({
+      status: "Error",
+      message: "Admin or organizer access required",
+    });
+  }
+  next();
 };
 
 
 // Initialize database and predefined accounts
 async function initializeDatabase() {
-  try {
-    await client.connect();
-    const db = client.db("project_event_db");
+  try {
+    await client.connect();
+    const db = client.db("project_event_db");
 
 
-    const usersCollection = db.collection("users");
-    const eventsCollection = db.collection("events");
-    const registrationsCollection = db.collection("registrations");
-    const attendanceCollection = db.collection("attendance");
-    const notificationsCollection = db.collection("notifications");
-    // inside initializeDatabase, after other collections
-    const venuesCollection = db.collection("venues");
-    await venuesCollection.createIndex({ name: 1 }, { unique: true });
+    const usersCollection = db.collection("users");
+    const eventsCollection = db.collection("events");
+    const registrationsCollection = db.collection("registrations");
+    const attendanceCollection = db.collection("attendance");
+    const notificationsCollection = db.collection("notifications");
+    // inside initializeDatabase, after other collections
+    const venuesCollection = db.collection("venues");
+    await venuesCollection.createIndex({ name: 1 }, { unique: true });
 // Add this to initializeDatabase function
 const otpCollection = db.collection("password_reset_otps");
 await otpCollection.createIndex({ email: 1 });
@@ -108,73 +108,73 @@ await otpCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 600 }); 
 
 
 
-    await usersCollection.createIndex({ email: 1 }, { unique: true });
+    await usersCollection.createIndex({ email: 1 }, { unique: true });
     setupAutomatedReminders()
 
 
-    const predefinedAccounts = [
-      {
-        fullName: "Admin User",
-        rollNumber: "ADMIN001",
-        branch: "MCA",
-        role: "admin",
-        email: "admin@college.com",
-        password: await bcrypt.hash("admin123", 10),
-        approved: true,
-      },
-      {
-        fullName: "Event Organizer",
-        rollNumber: "ORG001",
-        branch: "CSE",
-        role: "organizer",
-        email: "organizer@college.com",
-        password: "organizer123",
-        approved: true,
-      },
-      {
-        fullName: "Event Organizer",
-        rollNumber: "ORG001",
-        branch: "CSE",
-        role: "organizer",
-        email: "organizer@college.co",
-        password: "organizer123",
-        approved: true,
-      },
+    const predefinedAccounts = [
+      {
+        fullName: "Admin User",
+        rollNumber: "ADMIN001",
+        branch: "MCA",
+        role: "admin",
+        email: "admin@college.com",
+        password: await bcrypt.hash("admin123", 10),
+        approved: true,
+      },
+      {
+        fullName: "Event Organizer",
+        rollNumber: "ORG001",
+        branch: "CSE",
+        role: "organizer",
+        email: "organizer@college.com",
+        password: "organizer123",
+        approved: true,
+      },
+      {
+        fullName: "Event Organizer",
+        rollNumber: "ORG001",
+        branch: "CSE",
+        role: "organizer",
+        email: "organizer@college.co",
+        password: "organizer123",
+        approved: true,
+      },
 
-    ];
-
-
-    for (const account of predefinedAccounts) {
-      const exists = await usersCollection.findOne({ email: account.email });
-      if (!exists) {
-        await usersCollection.insertOne({
-          ...account,
-          createdAt: new Date(),
-        });
-        console.log(`✅ Created ${account.role} account: ${account.email}`);
-      }
-    }
+    ];
 
 
-    await registrationsCollection.createIndex(
-      { userId: 1, eventId: 1 },
-      { unique: true }
-    );
+    for (const account of predefinedAccounts) {
+      const exists = await usersCollection.findOne({ email: account.email });
+      if (!exists) {
+        await usersCollection.insertOne({
+          ...account,
+          createdAt: new Date(),
+        });
+        console.log(`✅ Created ${account.role} account: ${account.email}`);
+      }
+    }
 
 
-    await attendanceCollection.createIndex(
-      { userId: 1, eventId: 1 },
-      { unique: true }
-    );
+    await registrationsCollection.createIndex(
+      { userId: 1, eventId: 1 },
+      { unique: true }
+    );
 
 
-    await notificationsCollection.createIndex({ userId: 1, isRead: 1 });
+    await attendanceCollection.createIndex(
+      { userId: 1, eventId: 1 },
+      { unique: true }
+    );
 
 
-    console.log("✅ Database initialization complete");
-  } catch (err) {
-    console.error("❌ Database initialization error:", err);
-  }
+    await notificationsCollection.createIndex({ userId: 1, isRead: 1 });
+
+
+    console.log("✅ Database initialization complete");
+  } catch (err) {
+    console.error("❌ Database initialization error:", err);
+  }
 }
 
 
@@ -182,33 +182,26 @@ await otpCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 600 }); 
 
 
 async function createNotification({ userId, eventId, type, title, message }) {
-  const db = client.db("project_event_db");
-  const notificationsCollection = db.collection("notifications");
+  const db = client.db("project_event_db");
+  const notificationsCollection = db.collection("notifications");
 
 
-  const doc = {
-    userId: new ObjectId(userId),
-    eventId: eventId ? new ObjectId(eventId) : null,
-    type, // e.g. "event_created", "event_updated"
-    title,
-    message,
-    isRead: false,
-    createdAt: new Date(),
-  };
+  const doc = {
+    userId: new ObjectId(userId),
+    eventId: eventId ? new ObjectId(eventId) : null,
+    type, // e.g. "event_created", "event_updated"
+    title,
+    message,
+    isRead: false,
+    createdAt: new Date(),
+  };
 
 
-  await notificationsCollection.insertOne(doc);
+  await notificationsCollection.insertOne(doc);
 }
 
 
 // --------------------- USER & ORGANIZER ---------------------
-
-const otpStore = new Map(); // Format: { email: { otp, expiresAt, userData } }
-
-// Helper function to generate 6-digit OTP
-const generateOTP = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-};
 
 // Helper function to validate strong password
 const validatePassword = (password) => {
@@ -231,340 +224,101 @@ const validatePassword = (password) => {
   };
 };
 
-// Helper function to send OTP email (with SendGrid and Gmail fallback)
-const sendOTPEmail = async (email, otp, fullName) => {
-  console.log('=================================');
-  console.log('📧 Sending OTP Email via SendGrid');
-  console.log('To:', email);
-  console.log('From:', process.env.EMAIL_USER);
-  console.log('OTP:', otp);
-  console.log('=================================');
-
-  // Check if SendGrid is configured
-  if (!process.env.SENDGRID_API_KEY) {
-    console.error('❌ SENDGRID_API_KEY not configured');
-    throw new Error('Email service not configured. Please add SENDGRID_API_KEY to environment variables.');
-  }
-
-  if (!process.env.EMAIL_USER) {
-    console.error('❌ EMAIL_USER not configured');
-    throw new Error('Sender email not configured. Please add EMAIL_USER to environment variables.');
-  }
-
-  const msg = {
-    to: email,
-    from: process.env.EMAIL_USER, // MUST be verified in SendGrid
-    subject: 'Email Verification - Event Management System',
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px; text-align: center;">
-          <h1 style="color: white; margin: 0;">Email Verification</h1>
-        </div>
-        
-        <div style="background-color: #f7fafc; padding: 30px; border-radius: 10px; margin-top: 20px;">
-          <p style="font-size: 16px; color: #2d3748;">Hello <strong>${fullName}</strong>,</p>
-          
-          <p style="font-size: 16px; color: #2d3748;">
-            Thank you for registering with our Event Management System! To complete your registration, please use the following One-Time Password (OTP):
-          </p>
-          
-          <div style="background-color: white; border: 2px dashed #667eea; border-radius: 10px; padding: 20px; text-align: center; margin: 30px 0;">
-            <p style="font-size: 14px; color: #718096; margin-bottom: 10px;">Your OTP Code</p>
-            <h2 style="font-size: 36px; color: #667eea; letter-spacing: 8px; margin: 0; font-weight: bold;">
-              ${otp}
-            </h2>
-          </div>
-          
-          <p style="font-size: 14px; color: #e53e3e; margin-top: 20px;">
-            ⏰ This OTP will expire in <strong>10 minutes</strong>
-          </p>
-          
-          <p style="font-size: 14px; color: #718096; margin-top: 20px;">
-            If you didn't request this registration, please ignore this email.
-          </p>
-        </div>
-        
-        <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
-          <p style="font-size: 12px; color: #a0aec0;">
-            Event Management System<br>
-            This is an automated email, please do not reply.
-          </p>
-        </div>
-      </div>
-    `
-  };
-
-  try {
-    console.log('📤 Sending email via SendGrid...');
-    const response = await sgMail.send(msg);
-    console.log('✅ Email sent successfully via SendGrid!');
-    console.log('📧 Response Status:', response[0].statusCode);
-    return response;
-  } catch (error) {
-    console.error('❌ SendGrid Error!');
-    console.error('Error Message:', error.message);
-    
-    if (error.response) {
-      console.error('Status Code:', error.response.statusCode);
-      console.error('Response Body:', JSON.stringify(error.response.body, null, 2));
-      
-      // Log specific SendGrid errors
-      if (error.response.body.errors) {
-        error.response.body.errors.forEach(err => {
-          console.error('  ❌ Error:', err.message);
-          console.error('     Field:', err.field);
-          if (err.help) console.error('     Help:', err.help);
-        });
-      }
-    }
-    
-    // Throw user-friendly error
-    throw new Error('Failed to send verification email. Please check your email address and try again.');
-  }
-};
-// Register endpoint
+// ================================================
+// SIMPLIFIED REGISTRATION - NO OTP VERIFICATION
+// ================================================
 app.post("/register", async (req, res) => {
   try {
-    const { fullName, rollNumber, branch, role, email, password, otp, step } = req.body;
+    const { fullName, rollNumber, branch, role, email, password } = req.body;
 
-    // ================================================
-    // STEP 1: Request OTP (Initial Registration)
-    // ================================================
-    if (step === 'request-otp') {
-      // Validate required fields
-      if (!fullName || !rollNumber || !branch || !role || !email || !password) {
-        return res.status(400).json({ 
-          status: "Error", 
-          message: "All fields are required" 
-        });
-      }
+    console.log("📝 Registration attempt for:", email);
 
-      // Validate email format
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email)) {
-        return res.status(400).json({ 
-          status: "Error", 
-          message: "Invalid email format" 
-        });
-      }
-
-      // Validate strong password
-      const passwordValidation = validatePassword(password);
-      if (!passwordValidation.isValid) {
-        let errorMessage = "Password must contain: ";
-        const errors = [];
-        if (!passwordValidation.errors.minLength) errors.push("at least 8 characters");
-        if (!passwordValidation.errors.hasUpperCase) errors.push("one uppercase letter");
-        if (!passwordValidation.errors.hasLowerCase) errors.push("one lowercase letter");
-        if (!passwordValidation.errors.hasNumber) errors.push("one number");
-        if (!passwordValidation.errors.hasSpecialChar) errors.push("one special character (!@#$%^&*)");
-        
-        return res.status(400).json({ 
-          status: "Error", 
-          message: errorMessage + errors.join(", "),
-          passwordRequirements: passwordValidation.errors
-        });
-      }
-
-      const db = client.db("project_event_db");
-      const usersCollection = db.collection("users");
-
-      // Check if email already exists
-      const existingUser = await usersCollection.findOne({ email });
-      if (existingUser) {
-        return res.status(400).json({ 
-          status: "Error", 
-          message: "Email already exists" 
-        });
-      }
-
-      // Generate OTP
-      const generatedOTP = generateOTP();
-      const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
-
-      // Store OTP and user data temporarily
-      otpStore.set(email, {
-        otp: generatedOTP,
-        expiresAt,
-        userData: {
-          fullName,
-          rollNumber,
-          branch,
-          role,
-          email,
-          password,
-        }
-      });
-
-      // Send OTP email
-      try {
-        await sendOTPEmail(email, generatedOTP, fullName);
-      } catch (emailError) {
-        console.error("Error sending email:", emailError);
-        otpStore.delete(email);
-        return res.status(500).json({ 
-          status: "Error", 
-          message: "Failed to send verification email. Please check your email address and try again." 
-        });
-      }
-
-      // Clean up expired OTPs
-      for (const [key, value] of otpStore.entries()) {
-        if (value.expiresAt < Date.now()) {
-          otpStore.delete(key);
-        }
-      }
-
-      return res.status(200).json({
-        status: "Success",
-        message: "OTP sent to your email. Please verify within 10 minutes.",
-        requireOTP: true,
-        email: email
+    // Validation
+    if (!fullName || !rollNumber || !branch || !role || !email || !password) {
+      return res.status(400).json({
+        status: "Error",
+        message: "All fields are required",
       });
     }
 
-    // ================================================
-    // STEP 2: Verify OTP and Complete Registration
-    // ================================================
-    if (step === 'verify-otp') {
-      if (!email || !otp) {
-        return res.status(400).json({ 
-          status: "Error", 
-          message: "Email and OTP are required" 
-        });
-      }
-
-      // Check if OTP exists for this email
-      const otpData = otpStore.get(email);
-      if (!otpData) {
-        return res.status(400).json({ 
-          status: "Error", 
-          message: "OTP not found or expired. Please request a new OTP." 
-        });
-      }
-
-      // Check if OTP is expired
-      if (otpData.expiresAt < Date.now()) {
-        otpStore.delete(email);
-        return res.status(400).json({ 
-          status: "Error", 
-          message: "OTP has expired. Please request a new OTP." 
-        });
-      }
-
-      // Verify OTP
-      if (otpData.otp !== otp.trim()) {
-        return res.status(400).json({ 
-          status: "Error", 
-          message: "Invalid OTP. Please check and try again." 
-        });
-      }
-
-      // OTP is valid, proceed with registration
-      const db = client.db("project_event_db");
-      const usersCollection = db.collection("users");
-
-      const { userData } = otpData;
-
-      // Double-check if email exists
-      const existingUser = await usersCollection.findOne({ email: userData.email });
-      if (existingUser) {
-        otpStore.delete(email);
-        return res.status(400).json({ 
-          status: "Error", 
-          message: "Email already exists" 
-        });
-      }
-
-      // Determine approval status
-      let approved = userData.role === "user";
-
-      // Create new user
-      const newUser = {
-        fullName: userData.fullName,
-        rollNumber: userData.rollNumber,
-        branch: userData.branch,
-        role: userData.role,
-        email: userData.email,
-        password: userData.password,
-        approved,
-        emailVerified: true,
-        createdAt: new Date(),
-      };
-
-      await usersCollection.insertOne(newUser);
-
-      // Delete OTP from store
-      otpStore.delete(email);
-
-      return res.status(200).json({
-        status: "Success",
-        message: `Registration successful! ${userData.role === 'organizer' ? 'Please wait for admin approval before logging in.' : 'You can now login with your credentials.'}`,
-        emailVerified: true
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        status: "Error",
+        message: "Invalid email format",
       });
     }
 
-    // ================================================
-    // STEP 3: Resend OTP
-    // ================================================
-    if (step === 'resend-otp') {
-      if (!email) {
-        return res.status(400).json({ 
-          status: "Error", 
-          message: "Email is required" 
-        });
-      }
-
-      // Check if OTP exists for this email
-      const otpData = otpStore.get(email);
-      if (!otpData) {
-        return res.status(400).json({ 
-          status: "Error", 
-          message: "No pending registration found. Please start registration again." 
-        });
-      }
-
-      // Generate new OTP
-      const newOTP = generateOTP();
-      const expiresAt = Date.now() + 10 * 60 * 1000;
-
-      // Update OTP data
-      otpData.otp = newOTP;
-      otpData.expiresAt = expiresAt;
-      otpStore.set(email, otpData);
-
-      // Send new OTP email
-      try {
-        await sendOTPEmail(email, newOTP, otpData.userData.fullName);
-      } catch (emailError) {
-        console.error("Error sending email:", emailError);
-        return res.status(500).json({ 
-          status: "Error", 
-          message: "Failed to send verification email. Please try again." 
-        });
-      }
-
-      return res.status(200).json({
-        status: "Success",
-        message: "New OTP sent to your email.",
-        email: email
+    // Validate password strength
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.isValid) {
+      let errorMessage = "Password must contain: ";
+      const errors = [];
+      if (!passwordValidation.errors.minLength) errors.push("at least 8 characters");
+      if (!passwordValidation.errors.hasUpperCase) errors.push("one uppercase letter");
+      if (!passwordValidation.errors.hasLowerCase) errors.push("one lowercase letter");
+      if (!passwordValidation.errors.hasNumber) errors.push("one number");
+      if (!passwordValidation.errors.hasSpecialChar) errors.push("one special character (!@#$%^&*)");
+      
+      return res.status(400).json({
+        status: "Error",
+        message: errorMessage + errors.join(", "),
+        passwordRequirements: passwordValidation.errors,
       });
     }
 
-    // If none of the above conditions match
-    return res.status(400).json({
-      status: "Error",
-      message: "Invalid request. Please specify the step (request-otp, verify-otp, or resend-otp)."
+    const db = client.db("project_event_db");
+    const usersCollection = db.collection("users");
+
+    // Check if email already exists
+    const existingUser = await usersCollection.findOne({ email });
+    if (existingUser) {
+      console.log("❌ Email already exists:", email);
+      return res.status(400).json({
+        status: "Error",
+        message: "Email already exists",
+      });
+    }
+
+    // Hash password with bcrypt
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Determine approval status
+    const approved = role === "user"; // Users auto-approved, organizers need admin approval
+
+    // Create new user
+    const newUser = {
+      fullName,
+      rollNumber,
+      branch,
+      role,
+      email,
+      password: hashedPassword,
+      approved,
+      createdAt: new Date(),
+    };
+
+    const result = await usersCollection.insertOne(newUser);
+
+    console.log("✅ User registered successfully:", email);
+
+    return res.status(201).json({
+      status: "Success",
+      message: "Registration successful",
     });
 
-  } catch (err) {
-    console.error("Registration error:", err);
-    res.status(500).json({ 
-      status: "Error", 
-      message: "Registration failed. Please try again." 
+  } catch (error) {
+    console.error("❌ Registration error:", error);
+    return res.status(500).json({
+      status: "Error",
+      message: "Registration failed. Please try again.",
+      details: error.message,
     });
   }
 });
+
+
 setInterval(() => {
   const now = Date.now();
   let cleaned = 0;
@@ -607,17 +361,43 @@ app.post("/login", async (req, res) => {
         .json({ status: "Error", message: "Role mismatch" });
 
 
-    if (role === "organizer" && !user.approved)
-      return res.status(403).json({
-        status: "Error",
-        message: "Organizer not approved yet",
-      });
+    if (role === "organizer" && !user.approved)
+      return res.status(403).json({
+        status: "Error",
+        message: "Organizer not approved yet",
+      });
 
 
-    if (user.password !== password)
-      return res
-        .status(400)
-        .json({ status: "Error", message: "Incorrect password" });
+    // Check password - support both plain text (old accounts) and bcrypt hashed (new accounts)
+    let isPasswordValid = false;
+    
+    // Check if password is bcrypt hashed (starts with $2a$, $2b$, or $2y$)
+    const isBcryptHash = user.password.startsWith('$2a$') || 
+                         user.password.startsWith('$2b$') || 
+                         user.password.startsWith('$2y$');
+    
+    if (isBcryptHash) {
+      // New accounts with hashed passwords
+      isPasswordValid = await bcrypt.compare(password, user.password);
+    } else {
+      // Old accounts with plain text passwords
+      isPasswordValid = user.password === password;
+      
+      // Optional: Auto-upgrade old password to bcrypt hash
+      if (isPasswordValid) {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        await usersCollection.updateOne(
+          { email: user.email },
+          { $set: { password: hashedPassword } }
+        );
+        console.log(`✅ Auto-upgraded password to bcrypt for: ${user.email}`);
+      }
+    }
+    
+    if (!isPasswordValid)
+      return res
+        .status(400)
+        .json({ status: "Error", message: "Incorrect password" });
 
 
     const token = jwt.sign(
