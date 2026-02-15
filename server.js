@@ -9,116 +9,200 @@ const crypto = require('crypto');
 require("dotenv").config();
 const sgMail = require('@sendgrid/mail');
 
-// ========================================
-// SENDGRID CONFIGURATION - ENHANCED
-// ========================================
-console.log('\n==========================================');
-console.log('🔧 SENDGRID CONFIGURATION CHECK');
-console.log('==========================================');
-
 if (process.env.SENDGRID_API_KEY) {
   sgMail.setApiKey(process.env.SENDGRID_API_KEY);
   console.log('✅ SendGrid API configured successfully');
-  console.log('   API Key prefix:', process.env.SENDGRID_API_KEY.substring(0, 10) + '...');
 } else {
   console.error('❌ WARNING: SENDGRID_API_KEY not found in environment variables!');
-  console.error('   Emails will NOT work. Please add SENDGRID_API_KEY to environment.');
+  console.error('   Emails will NOT work. Please add SENDGRID_API_KEY to Render environment.');
 }
 
-if (!process.env.EMAIL_USER) {
-  console.error('❌ WARNING: EMAIL_USER not found!');
-  console.error('   Add EMAIL_USER to your .env file');
-  console.error('   MUST be verified in SendGrid: https://app.sendgrid.com/settings/sender_auth/senders');
-} else {
-  console.log('✅ Sender Email configured:', process.env.EMAIL_USER);
-  console.log('⚠️  IMPORTANT: Verify this email in SendGrid dashboard!');
-}
-
-console.log('==========================================\n');
-
+// ========================================
+// EMAIL CONFIGURATION - Using SendGrid Only
+// ========================================
+// Nodemailer removed - using SendGrid for all emails
 const cron = require('node-cron');
 
+
 const app = express();
-
-// Enhanced CORS configuration
-const corsOptions = {
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://localhost:4000',
-      'https://centralized-academic-event-control.onrender.com',
-      'https://centralized-academic-event-control-cnxr.onrender.com'
-    ];
-    
-    if (allowedOrigins.includes(origin) || origin.includes('localhost')) {
-      callback(null, true);
-    } else {
-      callback(null, true); // Allow for development
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'authority', 'method', 'path', 'scheme']
-};
-
-app.use(cors(corsOptions));
+app.use(cors());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(express.json());
+
 
 const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET;
 
+
 // MongoDB connection
 const uri = process.env.MONGO_URI;
 const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
 });
+
+
+// 4. Initialize Razorpay instance (add after MongoDB client initialization)
+
 
 // Middleware to verify JWT token
 const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-  if (!token) {
-    return res
-      .status(401)
-      .json({ status: "Error", message: "Access token required" });
-  }
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  if (!token) {
+    return res
+      .status(401)
+      .json({ status: "Error", message: "Access token required" });
+  }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res
-        .status(403)
-        .json({ status: "Error", message: "Invalid or expired token" });
-    }
-    req.user = user; // { email, role, userId }
-    next();
-  });
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res
+        .status(403)
+        .json({ status: "Error", message: "Invalid or expired token" });
+    }
+    req.user = user; // { email, role, userId }
+    next();
+  });
 };
-
 const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
+    key_id: process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
 // Middleware to check if user is admin or organizer
 const isAdminOrOrganizer = (req, res, next) => {
-  if (req.user.role !== "admin" && req.user.role !== "organizer") {
-    return res.status(403).json({
-      status: "Error",
-      message: "Admin or organizer access required",
-    });
-  }
-  next();
+  if (req.user.role !== "admin" && req.user.role !== "organizer") {
+    return res.status(403).json({
+      status: "Error",
+      message: "Admin or organizer access required",
+    });
+  }
+  next();
 };
 
-// OTP Store for registration
+
+// Initialize database and predefined accounts
+async function initializeDatabase() {
+  try {
+    await client.connect();
+    const db = client.db("project_event_db");
+
+
+    const usersCollection = db.collection("users");
+    const eventsCollection = db.collection("events");
+    const registrationsCollection = db.collection("registrations");
+    const attendanceCollection = db.collection("attendance");
+    const notificationsCollection = db.collection("notifications");
+    // inside initializeDatabase, after other collections
+    const venuesCollection = db.collection("venues");
+    await venuesCollection.createIndex({ name: 1 }, { unique: true });
+// Add this to initializeDatabase function
+const otpCollection = db.collection("password_reset_otps");
+await otpCollection.createIndex({ email: 1 });
+await otpCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 600 }); // OTP expires after 10 minutes
+
+
+
+    await usersCollection.createIndex({ email: 1 }, { unique: true });
+    setupAutomatedReminders()
+
+
+    const predefinedAccounts = [
+      {
+        fullName: "Admin User",
+        rollNumber: "ADMIN001",
+        branch: "MCA",
+        role: "admin",
+        email: "admin@college.com",
+        password: await bcrypt.hash("admin123", 10),
+        approved: true,
+      },
+      {
+        fullName: "Event Organizer",
+        rollNumber: "ORG001",
+        branch: "CSE",
+        role: "organizer",
+        email: "organizer@college.com",
+        password: "organizer123",
+        approved: true,
+      },
+      {
+        fullName: "Event Organizer",
+        rollNumber: "ORG001",
+        branch: "CSE",
+        role: "organizer",
+        email: "organizer@college.co",
+        password: "organizer123",
+        approved: true,
+      },
+
+    ];
+
+
+    for (const account of predefinedAccounts) {
+      const exists = await usersCollection.findOne({ email: account.email });
+      if (!exists) {
+        await usersCollection.insertOne({
+          ...account,
+          createdAt: new Date(),
+        });
+        console.log(`✅ Created ${account.role} account: ${account.email}`);
+      }
+    }
+
+
+    await registrationsCollection.createIndex(
+      { userId: 1, eventId: 1 },
+      { unique: true }
+    );
+
+
+    await attendanceCollection.createIndex(
+      { userId: 1, eventId: 1 },
+      { unique: true }
+    );
+
+
+    await notificationsCollection.createIndex({ userId: 1, isRead: 1 });
+
+
+    console.log("✅ Database initialization complete");
+  } catch (err) {
+    console.error("❌ Database initialization error:", err);
+  }
+}
+
+
+// --------------------- NOTIFICATION HELPER ---------------------
+
+
+async function createNotification({ userId, eventId, type, title, message }) {
+  const db = client.db("project_event_db");
+  const notificationsCollection = db.collection("notifications");
+
+
+  const doc = {
+    userId: new ObjectId(userId),
+    eventId: eventId ? new ObjectId(eventId) : null,
+    type, // e.g. "event_created", "event_updated"
+    title,
+    message,
+    isRead: false,
+    createdAt: new Date(),
+  };
+
+
+  await notificationsCollection.insertOne(doc);
+}
+
+
+// --------------------- USER & ORGANIZER ---------------------
+
 const otpStore = new Map(); // Format: { email: { otp, expiresAt, userData } }
 
 // Helper function to generate 6-digit OTP
@@ -128,6 +212,7 @@ const generateOTP = () => {
 
 // Helper function to validate strong password
 const validatePassword = (password) => {
+  // Minimum 8 characters, at least one uppercase, one lowercase, one number, one special character
   const minLength = password.length >= 8;
   const hasUpperCase = /[A-Z]/.test(password);
   const hasLowerCase = /[a-z]/.test(password);
@@ -146,102 +231,62 @@ const validatePassword = (password) => {
   };
 };
 
-// ========================================
-// FIXED: Send OTP Email via SendGrid
-// ========================================
-const sendOTPEmail = async (email, otp, fullName, purpose = 'registration') => {
-  console.log('\n=================================');
-  console.log('📧 SENDING OTP EMAIL');
+// Helper function to send OTP email (with SendGrid and Gmail fallback)
+const sendOTPEmail = async (email, otp, fullName) => {
   console.log('=================================');
+  console.log('📧 Sending OTP Email via SendGrid');
   console.log('To:', email);
   console.log('From:', process.env.EMAIL_USER);
   console.log('OTP:', otp);
-  console.log('Purpose:', purpose);
-  console.log('=================================\n');
+  console.log('=================================');
 
-  // Pre-flight checks
+  // Check if SendGrid is configured
   if (!process.env.SENDGRID_API_KEY) {
-    const errorMsg = 'SENDGRID_API_KEY is not configured in environment variables';
-    console.error('❌', errorMsg);
-    throw new Error(errorMsg);
+    console.error('❌ SENDGRID_API_KEY not configured');
+    throw new Error('Email service not configured. Please add SENDGRID_API_KEY to environment variables.');
   }
 
   if (!process.env.EMAIL_USER) {
-    const errorMsg = 'EMAIL_USER (sender email) is not configured in environment variables';
-    console.error('❌', errorMsg);
-    throw new Error(errorMsg);
+    console.error('❌ EMAIL_USER not configured');
+    throw new Error('Sender email not configured. Please add EMAIL_USER to environment variables.');
   }
-
-  // Validate email format
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) {
-    const errorMsg = `Invalid recipient email format: ${email}`;
-    console.error('❌', errorMsg);
-    throw new Error(errorMsg);
-  }
-
-  const subjects = {
-    registration: '🔐 Email Verification - Event Management System',
-    'password-reset': '🔒 Password Reset OTP - Event Management System'
-  };
-
-  const titles = {
-    registration: '🔐 Email Verification',
-    'password-reset': '🔒 Password Reset'
-  };
-
-  const messages = {
-    registration: 'Thank you for registering with our Event Management System! To complete your registration, please use the following OTP:',
-    'password-reset': 'We received a request to reset your password. Please use the following OTP to proceed:'
-  };
 
   const msg = {
     to: email,
-    from: {
-      email: process.env.EMAIL_USER,
-      name: 'Event Management System'
-    },
-    subject: subjects[purpose] || subjects.registration,
-    text: `Hello ${fullName},\n\nYour OTP for ${purpose} is: ${otp}\n\nThis OTP will expire in 10 minutes.\n\nIf you didn't request this, please ignore this email.\n\nBest regards,\nEvent Management System`,
+    from: process.env.EMAIL_USER, // MUST be verified in SendGrid
+    subject: 'Email Verification - Event Management System',
     html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f5f5f5;">
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px; text-align: center;">
-          <h1 style="color: white; margin: 0; font-size: 28px;">${titles[purpose]}</h1>
+          <h1 style="color: white; margin: 0;">Email Verification</h1>
         </div>
         
-        <div style="background-color: white; padding: 40px; border-radius: 10px; margin-top: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-          <p style="font-size: 18px; color: #2d3748; margin-bottom: 20px;">
-            Hello <strong style="color: #667eea;">${fullName}</strong>,
+        <div style="background-color: #f7fafc; padding: 30px; border-radius: 10px; margin-top: 20px;">
+          <p style="font-size: 16px; color: #2d3748;">Hello <strong>${fullName}</strong>,</p>
+          
+          <p style="font-size: 16px; color: #2d3748;">
+            Thank you for registering with our Event Management System! To complete your registration, please use the following One-Time Password (OTP):
           </p>
           
-          <p style="font-size: 16px; color: #4a5568; line-height: 1.6;">
-            ${messages[purpose]}
-          </p>
-          
-          <div style="background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%); border: 3px dashed #667eea; border-radius: 12px; padding: 30px; text-align: center; margin: 30px 0;">
-            <p style="font-size: 14px; color: #718096; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px;">Your OTP Code</p>
-            <h2 style="font-size: 48px; color: #667eea; letter-spacing: 12px; margin: 10px 0; font-weight: bold; font-family: 'Courier New', monospace;">
+          <div style="background-color: white; border: 2px dashed #667eea; border-radius: 10px; padding: 20px; text-align: center; margin: 30px 0;">
+            <p style="font-size: 14px; color: #718096; margin-bottom: 10px;">Your OTP Code</p>
+            <h2 style="font-size: 36px; color: #667eea; letter-spacing: 8px; margin: 0; font-weight: bold;">
               ${otp}
             </h2>
-            <p style="font-size: 12px; color: #a0aec0; margin-top: 10px;">Copy this code to complete verification</p>
           </div>
           
-          <div style="background-color: #fff5f5; border-left: 4px solid #e53e3e; padding: 15px; margin: 20px 0; border-radius: 4px;">
-            <p style="font-size: 14px; color: #c53030; margin: 0;">
-              ⏰ <strong>Important:</strong> This OTP will expire in <strong>10 minutes</strong>
-            </p>
-          </div>
+          <p style="font-size: 14px; color: #e53e3e; margin-top: 20px;">
+            ⏰ This OTP will expire in <strong>10 minutes</strong>
+          </p>
           
-          <p style="font-size: 14px; color: #718096; margin-top: 30px; line-height: 1.6;">
-            If you didn't request this, please ignore this email.
+          <p style="font-size: 14px; color: #718096; margin-top: 20px;">
+            If you didn't request this registration, please ignore this email.
           </p>
         </div>
         
-        <div style="text-align: center; margin-top: 30px; padding: 20px;">
-          <p style="font-size: 12px; color: #a0aec0; margin: 5px 0;">
-            Event Management System
-          </p>
-          <p style="font-size: 11px; color: #cbd5e0; margin: 5px 0;">
+        <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+          <p style="font-size: 12px; color: #a0aec0;">
+            Event Management System<br>
             This is an automated email, please do not reply.
           </p>
         </div>
@@ -250,147 +295,35 @@ const sendOTPEmail = async (email, otp, fullName, purpose = 'registration') => {
   };
 
   try {
-    console.log('📤 Attempting to send email via SendGrid...');
+    console.log('📤 Sending email via SendGrid...');
     const response = await sgMail.send(msg);
-    
-    console.log('\n✅ ✅ ✅ EMAIL SENT SUCCESSFULLY! ✅ ✅ ✅');
-    console.log('📊 Response Status Code:', response[0].statusCode);
-    console.log('=================================\n');
-    
+    console.log('✅ Email sent successfully via SendGrid!');
+    console.log('📧 Response Status:', response[0].statusCode);
     return response;
   } catch (error) {
-    console.error('\n❌ ❌ ❌ SENDGRID ERROR! ❌ ❌ ❌');
-    console.error('Error Type:', error.constructor.name);
+    console.error('❌ SendGrid Error!');
     console.error('Error Message:', error.message);
     
     if (error.response) {
-      console.error('\n📋 SendGrid Response Details:');
-      console.error('  Status Code:', error.response.statusCode);
+      console.error('Status Code:', error.response.statusCode);
+      console.error('Response Body:', JSON.stringify(error.response.body, null, 2));
       
-      if (error.response.body) {
-        console.error('  Response Body:', JSON.stringify(error.response.body, null, 2));
-      }
-      
-      // Common SendGrid errors and solutions
-      if (error.response.statusCode === 401) {
-        console.error('\n💡 SOLUTION: Your API key is invalid or expired');
-        console.error('   Generate new key at: https://app.sendgrid.com/settings/api_keys');
-      }
-      if (error.response.statusCode === 403) {
-        console.error('\n💡 SOLUTION: Your sender email is NOT verified');
-        console.error('   Verify at: https://app.sendgrid.com/settings/sender_auth/senders');
-        console.error('   Current sender:', process.env.EMAIL_USER);
+      // Log specific SendGrid errors
+      if (error.response.body.errors) {
+        error.response.body.errors.forEach(err => {
+          console.error('  ❌ Error:', err.message);
+          console.error('     Field:', err.field);
+          if (err.help) console.error('     Help:', err.help);
+        });
       }
     }
     
-    console.error('\n=================================\n');
-    throw new Error(`Failed to send verification email: ${error.message}`);
+    // Throw user-friendly error
+    throw new Error('Failed to send verification email. Please check your email address and try again.');
   }
 };
-
-// Create notification helper
-async function createNotification({ userId, eventId, type, title, message }) {
-  const db = client.db("project_event_db");
-  const notificationsCollection = db.collection("notifications");
-
-  const doc = {
-    userId: new ObjectId(userId),
-    eventId: eventId ? new ObjectId(eventId) : null,
-    type,
-    title,
-    message,
-    isRead: false,
-    createdAt: new Date(),
-  };
-
-  await notificationsCollection.insertOne(doc);
-}
-
-// Initialize database and predefined accounts
-async function initializeDatabase() {
-  try {
-    await client.connect();
-    const db = client.db("project_event_db");
-
-    const usersCollection = db.collection("users");
-    const eventsCollection = db.collection("events");
-    const registrationsCollection = db.collection("registrations");
-    const attendanceCollection = db.collection("attendance");
-    const notificationsCollection = db.collection("notifications");
-    const venuesCollection = db.collection("venues");
-    const otpCollection = db.collection("password_reset_otps");
-
-    await venuesCollection.createIndex({ name: 1 }, { unique: true });
-    await otpCollection.createIndex({ email: 1 });
-    await otpCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 600 });
-
-    await usersCollection.createIndex({ email: 1 }, { unique: true });
-    setupAutomatedReminders();
-
-    const predefinedAccounts = [
-      {
-        fullName: "Admin User",
-        rollNumber: "ADMIN001",
-        branch: "MCA",
-        role: "admin",
-        email: "admin@college.com",
-        password: await bcrypt.hash("admin123", 10),
-        approved: true,
-      },
-      {
-        fullName: "Event Organizer",
-        rollNumber: "ORG001",
-        branch: "CSE",
-        role: "organizer",
-        email: "organizer@college.com",
-        password: "organizer123",
-        approved: true,
-      },
-    ];
-
-    for (const account of predefinedAccounts) {
-      const exists = await usersCollection.findOne({ email: account.email });
-      if (!exists) {
-        await usersCollection.insertOne({
-          ...account,
-          createdAt: new Date(),
-        });
-        console.log(`✅ Created ${account.role} account: ${account.email}`);
-      }
-    }
-
-    await registrationsCollection.createIndex(
-      { userId: 1, eventId: 1 },
-      { unique: true }
-    );
-
-    await attendanceCollection.createIndex(
-      { userId: 1, eventId: 1 },
-      { unique: true }
-    );
-
-    await notificationsCollection.createIndex({ userId: 1, isRead: 1 });
-
-    console.log("✅ Database initialization complete");
-  } catch (err) {
-    console.error("❌ Database initialization error:", err);
-  }
-}
-
-// Setup automated reminders function
-function setupAutomatedReminders() {
-  // Implementation here - keeping your original
-  console.log('✅ Automated reminder system initialized');
-}
-
-// ========================================
-// FIXED: REGISTRATION ENDPOINT WITH OTP
-// ========================================
+// Register endpoint
 app.post("/register", async (req, res) => {
-  console.log('\n🔵 ===== REGISTRATION REQUEST ===== 🔵');
-  console.log('Step:', req.body.step);
-  console.log('Email:', req.body.email);
-  
   try {
     const { fullName, rollNumber, branch, role, email, password, otp, step } = req.body;
 
@@ -398,8 +331,6 @@ app.post("/register", async (req, res) => {
     // STEP 1: Request OTP (Initial Registration)
     // ================================================
     if (step === 'request-otp') {
-      console.log('📝 Step 1: Requesting OTP');
-      
       // Validate required fields
       if (!fullName || !rollNumber || !branch || !role || !email || !password) {
         return res.status(400).json({ 
@@ -451,8 +382,6 @@ app.post("/register", async (req, res) => {
       const generatedOTP = generateOTP();
       const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
 
-      console.log('🔐 Generated OTP:', generatedOTP);
-
       // Store OTP and user data temporarily
       otpStore.set(email, {
         otp: generatedOTP,
@@ -469,15 +398,13 @@ app.post("/register", async (req, res) => {
 
       // Send OTP email
       try {
-        await sendOTPEmail(email, generatedOTP, fullName, 'registration');
-        console.log('✅ OTP email sent successfully\n');
+        await sendOTPEmail(email, generatedOTP, fullName);
       } catch (emailError) {
-        console.error('❌ Error sending email:', emailError.message);
+        console.error("Error sending email:", emailError);
         otpStore.delete(email);
         return res.status(500).json({ 
           status: "Error", 
-          message: "Failed to send verification email. Please check your email address and try again.",
-          details: emailError.message
+          message: "Failed to send verification email. Please check your email address and try again." 
         });
       }
 
@@ -500,8 +427,6 @@ app.post("/register", async (req, res) => {
     // STEP 2: Verify OTP and Complete Registration
     // ================================================
     if (step === 'verify-otp') {
-      console.log('🔑 Step 2: Verifying OTP');
-      
       if (!email || !otp) {
         return res.status(400).json({ 
           status: "Error", 
@@ -534,8 +459,6 @@ app.post("/register", async (req, res) => {
           message: "Invalid OTP. Please check and try again." 
         });
       }
-
-      console.log('✅ OTP verified successfully!');
 
       // OTP is valid, proceed with registration
       const db = client.db("project_event_db");
@@ -574,12 +497,10 @@ app.post("/register", async (req, res) => {
       // Delete OTP from store
       otpStore.delete(email);
 
-      console.log('✅ ✅ ✅ REGISTRATION COMPLETE! ✅ ✅ ✅\n');
       return res.status(200).json({
         status: "Success",
-        message: userData.role === "organizer" 
-          ? "Registration successful! Your account is pending approval from admin."
-          : "Registration successful! You can now login.",
+        message: `Registration successful! ${userData.role === 'organizer' ? 'Please wait for admin approval before logging in.' : 'You can now login with your credentials.'}`,
+        emailVerified: true
       });
     }
 
@@ -587,8 +508,6 @@ app.post("/register", async (req, res) => {
     // STEP 3: Resend OTP
     // ================================================
     if (step === 'resend-otp') {
-      console.log('🔄 Step 3: Resending OTP');
-      
       if (!email) {
         return res.status(400).json({ 
           status: "Error", 
@@ -601,7 +520,7 @@ app.post("/register", async (req, res) => {
       if (!otpData) {
         return res.status(400).json({ 
           status: "Error", 
-          message: "No registration session found. Please start registration again." 
+          message: "No pending registration found. Please start registration again." 
         });
       }
 
@@ -609,56 +528,59 @@ app.post("/register", async (req, res) => {
       const newOTP = generateOTP();
       const expiresAt = Date.now() + 10 * 60 * 1000;
 
-      console.log('🔐 New OTP generated:', newOTP);
-
-      // Update OTP in store
+      // Update OTP data
       otpData.otp = newOTP;
       otpData.expiresAt = expiresAt;
       otpStore.set(email, otpData);
 
       // Send new OTP email
       try {
-        await sendOTPEmail(email, newOTP, otpData.userData.fullName, 'registration');
-        console.log('✅ New OTP sent successfully\n');
+        await sendOTPEmail(email, newOTP, otpData.userData.fullName);
       } catch (emailError) {
-        console.error('❌ Failed to send new OTP:', emailError.message);
+        console.error("Error sending email:", emailError);
         return res.status(500).json({ 
           status: "Error", 
-          message: "Failed to resend OTP. Please try again later.",
-          details: emailError.message
+          message: "Failed to send verification email. Please try again." 
         });
       }
 
       return res.status(200).json({
         status: "Success",
         message: "New OTP sent to your email.",
+        email: email
       });
     }
 
-    // Invalid step
+    // If none of the above conditions match
     return res.status(400).json({
       status: "Error",
-      message: "Invalid registration step"
+      message: "Invalid request. Please specify the step (request-otp, verify-otp, or resend-otp)."
     });
 
   } catch (err) {
-    console.error('❌ ❌ ❌ SERVER ERROR ❌ ❌ ❌');
-    console.error('Error:', err);
-    console.error('Stack:', err.stack);
-    console.error('==========================================\n');
-    
-    return res.status(500).json({
-      status: "Error",
-      message: "An error occurred during registration. Please try again.",
-      details: err.message
+    console.error("Registration error:", err);
+    res.status(500).json({ 
+      status: "Error", 
+      message: "Registration failed. Please try again." 
     });
   }
 });
+setInterval(() => {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [key, value] of otpStore.entries()) {
+    if (value.expiresAt < now) {
+      otpStore.delete(key);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) {
+    console.log(`✅ OTP cleanup: Removed ${cleaned} expired OTP(s). Active: ${otpStore.size}`);
+  }
+}, 15 * 60 * 1000);
 
-// ========================================
-// NOTE: Below this line, I'm keeping ALL your original endpoints unchanged
-// Only the registration and forgot-password endpoints are modified
-// ========================================
+
+// Login endpoint
 app.post("/login", async (req, res) => {
   try {
     const { email, password, role } = req.body;
@@ -2589,40 +2511,42 @@ const upload = multer({
 // Serve static files (add this if not already present)
 app.use('/sponsors', express.static(path.join(__dirname, 'public', 'sponsors')));
 
-// Upload sponsor image
-app.post('/sponsors/upload', authenticateToken, isAdminOrOrganizer, upload.single('sponsorImage'), async (req, res) => {
+// Upload sponsor image (handles both single and multiple)
+app.post('/sponsors/upload', authenticateToken, isAdminOrOrganizer, upload.array('sponsorImages', 10), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ status: 'Error', message: 'No file uploaded' });
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ status: 'Error', message: 'No files uploaded' });
     }
 
     const db = client.db("project_event_db");
     const sponsorsCollection = db.collection("sponsors");
 
-    const sponsor = {
-      filename: req.file.filename,
-      originalName: req.file.originalname,
-      path: req.file.path,
-      url: `/sponsors/${req.file.filename}`,
-      fullUrl: `${req.protocol}://${req.get('host')}/sponsors/${req.file.filename}`,
+    const currentCount = await sponsorsCollection.countDocuments();
+
+    const sponsors = req.files.map((file, index) => ({
+      filename: file.filename,
+      originalName: file.originalname,
+      path: file.path,
+      url: `/sponsors/${file.filename}`,
+      fullUrl: `${req.protocol}://${req.get('host')}/sponsors/${file.filename}`,
       uploadedBy: new ObjectId(req.user.userId),
       uploadedAt: new Date(),
       isActive: true,
-      order: await sponsorsCollection.countDocuments()
-    };
+      order: currentCount + index
+    }));
 
-    const result = await sponsorsCollection.insertOne(sponsor);
+    const result = await sponsorsCollection.insertMany(sponsors);
 
     res.json({
       status: 'Success',
-      message: 'Sponsor image uploaded successfully',
-      sponsor: {
-        id: result.insertedId,
-        filename: sponsor.filename,
-        url: sponsor.url,
-        fullUrl: sponsor.fullUrl,
-        uploadedAt: sponsor.uploadedAt
-      }
+      message: `${sponsors.length} sponsor image(s) uploaded successfully`,
+      sponsors: sponsors.map((s, i) => ({
+        id: result.insertedIds[i],
+        filename: s.filename,
+        url: s.url,
+        fullUrl: s.fullUrl,
+        uploadedAt: s.uploadedAt
+      }))
     });
 
   } catch (error) {
@@ -2679,8 +2603,25 @@ app.get('/sponsors', async (req, res) => {
     const db = client.db("project_event_db");
     const sponsorsCollection = db.collection("sponsors");
 
+    // Check if user is authenticated (admin/organizer can see all, public sees only active)
+    const token = req.headers.authorization?.split(' ')[1];
+    let showAll = false;
+    
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        if (decoded.role === 'admin' || decoded.role === 'organizer') {
+          showAll = true;
+        }
+      } catch (err) {
+        // Invalid token, treat as public
+        showAll = false;
+      }
+    }
+
+    const filter = showAll ? {} : { isActive: true };
     const sponsors = await sponsorsCollection
-      .find({ isActive: true })
+      .find(filter)
       .sort({ order: 1 })
       .toArray();
 
@@ -2778,15 +2719,11 @@ app.put('/sponsors/:sponsorId/toggle', authenticateToken, isAdminOrOrganizer, as
 // --------------------- FORGOT PASSWORD ENDPOINTS ---------------------
 
 // Step 1: Send OTP to email
-
-// ========================================
-// FORGOT PASSWORD - SEND OTP (FIXED)
-// ========================================
 app.post('/forgot-password/send-otp', async (req, res) => {
   try {
     const { email } = req.body;
 
-    console.log('🔐 Forgot Password: Sending OTP for:', email);
+    console.log('📧 Forgot password: Send OTP requested for:', email);
 
     if (!email) {
       return res.status(400).json({
@@ -2802,48 +2739,130 @@ app.post('/forgot-password/send-otp', async (req, res) => {
     // Check if user exists
     const user = await usersCollection.findOne({ email });
     if (!user) {
+      console.log('❌ User not found:', email);
       return res.status(404).json({
         status: 'Error',
         message: 'No account found with this email address'
       });
     }
 
-    // Generate OTP
-    const otp = generateOTP();
-    console.log('🔐 Generated password reset OTP:', otp);
+    console.log('✅ User found:', user.fullName);
 
-    // Delete old OTP if exists
-    await otpCollection.deleteOne({ email });
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log('🔑 Generated OTP:', otp);
 
-    // Store new OTP in database
-    await otpCollection.insertOne({
-      email,
-      otp,
-      verified: false,
-      createdAt: new Date()
+    // Store OTP in database (will auto-expire after 10 minutes)
+    await otpCollection.updateOne(
+      { email },
+      {
+        $set: {
+          email,
+          otp,
+          createdAt: new Date(),
+          verified: false
+        }
+      },
+      { upsert: true }
+    );
+
+    // Send OTP via email
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Password Reset OTP - Event Management System',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px; text-align: center;">
+            <h1 style="color: white; margin: 0;">Password Reset</h1>
+          </div>
+          
+          <div style="background-color: #f7fafc; padding: 30px; border-radius: 10px; margin-top: 20px;">
+            <p style="font-size: 16px; color: #2d3748;">Hello <strong>${user.fullName}</strong>,</p>
+            
+            <p style="font-size: 16px; color: #2d3748;">
+              We received a request to reset your password. Use the OTP below to continue:
+            </p>
+            
+            <div style="background-color: white; border: 2px dashed #667eea; border-radius: 10px; padding: 20px; text-align: center; margin: 30px 0;">
+              <p style="font-size: 14px; color: #718096; margin-bottom: 10px;">Your OTP Code</p>
+              <h2 style="font-size: 36px; color: #667eea; letter-spacing: 8px; margin: 0; font-weight: bold;">
+                ${otp}
+              </h2>
+            </div>
+            
+            <p style="font-size: 14px; color: #e53e3e; margin-top: 20px;">
+              ⏰ This OTP will expire in <strong>10 minutes</strong>
+            </p>
+            
+            <p style="font-size: 14px; color: #718096; margin-top: 20px;">
+              If you didn't request this, please ignore this email and your password will remain unchanged.
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+            <p style="font-size: 12px; color: #a0aec0;">
+              Event Management System<br>
+              This is an automated email, please do not reply.
+            </p>
+          </div>
+        </div>
+      `
+    };
+
+    const msg = {
+  to: email,
+  from: process.env.SENDGRID_FROM_EMAIL || process.env.EMAIL_USER || 'noreply@college.com',
+  subject: 'Password Reset OTP - Event Management System',
+  html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px; text-align: center;">
+            <h1 style="color: white; margin: 0;">Password Reset</h1>
+          </div>
+          
+          <div style="background-color: #f7fafc; padding: 30px; border-radius: 10px; margin-top: 20px;">
+            <p style="font-size: 16px; color: #2d3748;">Hello <strong>${user.fullName}</strong>,</p>
+            
+            <p style="font-size: 16px; color: #2d3748;">
+              We received a request to reset your password. Use the OTP below to continue:
+            </p>
+            
+            <div style="background-color: white; border: 2px dashed #667eea; border-radius: 10px; padding: 20px; text-align: center; margin: 30px 0;">
+              <p style="font-size: 14px; color: #718096; margin-bottom: 10px;">Your OTP Code</p>
+              <h2 style="font-size: 36px; color: #667eea; letter-spacing: 8px; margin: 0; font-weight: bold;">
+                ${otp}
+              </h2>
+            </div>
+            
+            <p style="font-size: 14px; color: #e53e3e; margin-top: 20px;">
+              ⏰ This OTP will expire in <strong>10 minutes</strong>
+            </p>
+            
+            <p style="font-size: 14px; color: #718096; margin-top: 20px;">
+              If you didn't request this, please ignore this email and your password will remain unchanged.
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+            <p style="font-size: 12px; color: #a0aec0;">
+              Event Management System<br>
+              This is an automated email, please do not reply.
+            </p>
+          </div>
+        </div>
+      `
+};
+await sgMail.send(msg);
+
+    console.log('✅ OTP email sent successfully');
+
+    res.json({
+      status: 'Success',
+      message: 'OTP sent to your email address'
     });
 
-    // Send OTP email
-    try {
-      await sendOTPEmail(email, otp, user.fullName, 'password-reset');
-      console.log('✅ Password reset OTP sent successfully');
-
-      res.json({
-        status: 'Success',
-        message: 'OTP sent to your email address'
-      });
-    } catch (emailError) {
-      console.error('❌ Failed to send password reset OTP:', emailError);
-      await otpCollection.deleteOne({ email });
-      res.status(500).json({
-        status: 'Error',
-        message: 'Failed to send OTP. Please try again.',
-        details: emailError.message
-      });
-    }
-
   } catch (error) {
-    console.error('❌ Error in forgot-password/send-otp:', error);
+    console.error('❌ Error sending OTP:', error);
     res.status(500).json({
       status: 'Error',
       message: 'Failed to send OTP. Please try again.',
@@ -2852,14 +2871,12 @@ app.post('/forgot-password/send-otp', async (req, res) => {
   }
 });
 
-// ========================================
-// FORGOT PASSWORD - VERIFY OTP (FIXED)
-// ========================================
+// Step 2: Verify OTP
 app.post('/forgot-password/verify-otp', async (req, res) => {
   try {
     const { email, otp } = req.body;
 
-    console.log('🔑 Verifying password reset OTP for:', email);
+    console.log('🔑 Verify OTP requested for:', email);
 
     if (!email || !otp) {
       return res.status(400).json({
@@ -2871,20 +2888,23 @@ app.post('/forgot-password/verify-otp', async (req, res) => {
     const db = client.db('project_event_db');
     const otpCollection = db.collection('password_reset_otps');
 
+    // Find OTP record
     const otpRecord = await otpCollection.findOne({ email });
 
     if (!otpRecord) {
+      console.log('❌ No OTP found for email:', email);
       return res.status(404).json({
         status: 'Error',
         message: 'No OTP found. Please request a new one.'
       });
     }
 
-    // Check if expired (10 minutes)
+    // Check if OTP is expired (10 minutes)
     const otpAge = Date.now() - new Date(otpRecord.createdAt).getTime();
     const tenMinutes = 10 * 60 * 1000;
 
     if (otpAge > tenMinutes) {
+      console.log('❌ OTP expired for:', email);
       await otpCollection.deleteOne({ email });
       return res.status(400).json({
         status: 'Error',
@@ -2892,21 +2912,22 @@ app.post('/forgot-password/verify-otp', async (req, res) => {
       });
     }
 
-    // Verify OTP
+    // Check if OTP matches
     if (otpRecord.otp !== otp) {
+      console.log('❌ Invalid OTP for:', email);
       return res.status(400).json({
         status: 'Error',
         message: 'Invalid OTP. Please try again.'
       });
     }
 
-    // Mark as verified
+    // Mark OTP as verified
     await otpCollection.updateOne(
       { email },
       { $set: { verified: true } }
     );
 
-    console.log('✅ OTP verified successfully');
+    console.log('✅ OTP verified successfully for:', email);
 
     res.json({
       status: 'Success',
@@ -2923,14 +2944,12 @@ app.post('/forgot-password/verify-otp', async (req, res) => {
   }
 });
 
-// ========================================
-// FORGOT PASSWORD - RESET PASSWORD (FIXED)
-// ========================================
+// Step 3: Reset Password
 app.post('/forgot-password/reset-password', async (req, res) => {
   try {
     const { email, otp, newPassword } = req.body;
 
-    console.log('🔒 Resetting password for:', email);
+    console.log('🔒 Reset password requested for:', email);
 
     if (!email || !otp || !newPassword) {
       return res.status(400).json({
@@ -2950,33 +2969,110 @@ app.post('/forgot-password/reset-password', async (req, res) => {
     const usersCollection = db.collection('users');
     const otpCollection = db.collection('password_reset_otps');
 
-    // Verify OTP
+    // Verify OTP is verified
     const otpRecord = await otpCollection.findOne({ email });
 
-    if (!otpRecord || !otpRecord.verified || otpRecord.otp !== otp) {
-      return res.status(400).json({
+    if (!otpRecord) {
+      console.log('❌ No OTP record found');
+      return res.status(404).json({
         status: 'Error',
-        message: 'Invalid or unverified OTP'
+        message: 'Invalid session. Please restart the process.'
       });
     }
 
-    // Update password
+    if (!otpRecord.verified) {
+      console.log('❌ OTP not verified');
+      return res.status(400).json({
+        status: 'Error',
+        message: 'Please verify OTP first'
+      });
+    }
+
+    if (otpRecord.otp !== otp) {
+      console.log('❌ OTP mismatch');
+      return res.status(400).json({
+        status: 'Error',
+        message: 'Invalid OTP'
+      });
+    }
+
+    // Update user password
+    // Note: In production, you should hash the password with bcrypt
     const result = await usersCollection.updateOne(
       { email },
       { $set: { password: newPassword } }
     );
 
     if (result.matchedCount === 0) {
+      console.log('❌ User not found:', email);
       return res.status(404).json({
         status: 'Error',
         message: 'User not found'
       });
     }
 
-    // Delete OTP
+    // Delete OTP record
     await otpCollection.deleteOne({ email });
 
-    console.log('✅ Password reset successful');
+    console.log('✅ Password reset successful for:', email);
+
+    // Send confirmation email
+    const user = await usersCollection.findOne({ email });
+    
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Password Reset Successful - Event Management System',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); padding: 30px; border-radius: 10px; text-align: center;">
+            <h1 style="color: white; margin: 0;">✅ Password Reset Successful</h1>
+          </div>
+          
+          <div style="background-color: #f7fafc; padding: 30px; border-radius: 10px; margin-top: 20px;">
+            <p style="font-size: 16px; color: #2d3748;">Hello <strong>${user.fullName}</strong>,</p>
+            
+            <p style="font-size: 16px; color: #2d3748;">
+              Your password has been successfully reset. You can now login with your new password.
+            </p>
+            
+            <div style="background-color: #d1fae5; border-left: 4px solid #10b981; padding: 15px; margin: 20px 0;">
+              <p style="font-size: 14px; color: #065f46; margin: 0;">
+                🔒 If you didn't make this change, please contact support immediately.
+              </p>
+            </div>
+          </div>
+          
+          <div style="text-align: center; margin-top: 30px;">
+            <a href="https://centralized-academic-event-control.onrender.com/login" 
+               style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                      color: white; 
+                      padding: 15px 40px; 
+                      text-decoration: none; 
+                      border-radius: 10px; 
+                      font-weight: bold;
+                      display: inline-block;">
+              Login Now
+            </a>
+          </div>
+          
+          <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+            <p style="font-size: 12px; color: #a0aec0;">
+              Event Management System<br>
+              This is an automated email, please do not reply.
+            </p>
+          </div>
+        </div>
+      `
+    };
+
+    try {
+      await transporter.sendMail(mailOptions);
+      console.log('✅ Confirmation email sent');
+    } catch (emailError) {
+      console.error('⚠️ Failed to send confirmation email:', emailError);
+      // Don't fail the request if email fails
+    }
 
     res.json({
       status: 'Success',
@@ -2991,20 +3087,4 @@ app.post('/forgot-password/reset-password', async (req, res) => {
       details: error.message
     });
   }
-});
-
-// ========================================
-// HEALTH CHECK ENDPOINT
-// ========================================
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    environment: {
-      SENDGRID_CONFIGURED: !!process.env.SENDGRID_API_KEY,
-      EMAIL_USER_CONFIGURED: !!process.env.EMAIL_USER,
-      MONGO_URI_CONFIGURED: !!process.env.MONGO_URI,
-      JWT_SECRET_CONFIGURED: !!process.env.JWT_SECRET
-    }
-  });
 });
